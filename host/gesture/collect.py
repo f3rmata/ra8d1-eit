@@ -221,8 +221,8 @@ def collect_session(args: argparse.Namespace) -> Path:
 
     print(f"Gesture collection session: {out_dir}")
     print(f"Gestures ({len(gestures)}): {gestures}")
-    print(f"Repetitions: {args.reps} × {args.frames_per_req} frames = "
-          f"{args.reps * args.frames_per_req} per gesture")
+    print(f"Repetitions: {args.reps} × {args.frames_per_rep} frames = "
+          f"{args.reps * args.frames_per_rep} per gesture")
     print()
 
     # Preload region masks for feature extraction
@@ -294,7 +294,7 @@ def collect_session(args: argparse.Namespace) -> Path:
                 print(f"  *** HOLD '{gesture}' ***", flush=True)
 
                 prev_ds = None
-                for f in range(args.frames_per_req):
+                for f in range(args.frames_per_rep):
                     frame = _read_reconfastbin(
                         ser,
                         electrodes=args.electrodes,
@@ -307,7 +307,7 @@ def collect_session(args: argparse.Namespace) -> Path:
                     )
 
                     if frame is None:
-                        print(f"    frame {f+1}/{args.frames_per_req}: MISSED", flush=True)
+                        print(f"    frame {f+1}/{args.frames_per_rep}: MISSED", flush=True)
                         continue
 
                     summary_dict = {
@@ -322,7 +322,7 @@ def collect_session(args: argparse.Namespace) -> Path:
 
                     # Quality filter
                     if frame.valid < args.min_valid:
-                        print(f"    frame {f+1}/{args.frames_per_req}: "
+                        print(f"    frame {f+1}/{args.frames_per_rep}: "
                               f"SKIP (valid={frame.valid} < {args.min_valid})", flush=True)
                         continue
 
@@ -365,12 +365,12 @@ def collect_session(args: argparse.Namespace) -> Path:
 
                     short_gesture = gesture[:6]
                     if not args.no_extract_features:
-                        print(f"    frame {f+1}/{args.frames_per_req}: "
+                        print(f"    frame {f+1}/{args.frames_per_rep}: "
                               f"#{frame_id} [{short_gesture}] "
                               f"valid={frame.valid} p98={frame.ds_abs_p98:.4f}",
                               flush=True)
                     else:
-                        print(f"    frame {f+1}/{args.frames_per_req}: "
+                        print(f"    frame {f+1}/{args.frames_per_rep}: "
                               f"#{frame_id} [{short_gesture}] "
                               f"valid={frame.valid}",
                               flush=True)
@@ -391,7 +391,7 @@ def collect_session(args: argparse.Namespace) -> Path:
         "timestamp": timestamp,
         "gestures": gestures,
         "repetitions": args.reps,
-        "frames_per_repetition": args.frames_per_req,
+        "frames_per_repetition": args.frames_per_rep,
         "electrodes": args.electrodes,
         "samples": args.samples,
         "settle_ms": args.settle_ms,

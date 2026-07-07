@@ -4,6 +4,7 @@
 #include "eit_sdram.h"
 #include "eit_lcd.h"
 #include "eit_ui.h"
+#include "eit_gesture_icons.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -109,6 +110,7 @@ static void command_recon_common(char * p, bool fast);
 static void command_reconbase(char * p);
 static void command_recondump(void);
 static void command_lcdtest(char * p);
+static void command_icon(char * p);
 static void command_raw(char * p, bool all_off_first);
 static void compute_scan_stat(uint16_t const * p_samples,
                               uint32_t samples,
@@ -371,6 +373,10 @@ static void process_line(char * p_line)
     {
         command_lcdtest(p);
     }
+    else if (0 == strcmp(command, "icon"))
+    {
+        command_icon(p);
+    }
     else
     {
         uart9_write_string("bad command; use h\r\n");
@@ -402,6 +408,7 @@ static void print_help(void)
     uart9_write_string("  reconbase 8 N 256 20 200000 180 1    average N valid frames into RAM baseline\r\n");
     uart9_write_string("  recondump                             print reconstruction model metadata\r\n");
     uart9_write_string("  lcd [color]                           LCD test: no arg=RGB cycle, arg=0xRRGGBB fill\r\n");
+    uart9_write_string("  icon r|s|p                             gesture icon: rock / scissors / paper\r\n");
     eit_board_print_signals(uart9_write_string);
     uart9_write_string("\r\n");
 }
@@ -1150,6 +1157,35 @@ static void command_lcdtest(char * p)
         uart9_write_hex2((uint8_t) (color & 0xFFU));
         uart9_write_string("\r\n");
         eit_ui_test_color((uint16_t) color);
+    }
+}
+
+static void command_icon(char * p)
+{
+    /* Skip whitespace to read the icon letter */
+    while (*p == ' ') p++;
+
+    char ch = *p;
+    if (ch >= 'A' && ch <= 'Z') ch = (char)(ch + ('a' - 'A')); /* lowercase */
+
+    if (ch == 'r')
+    {
+        uart9_write_string("icon: rock\r\n");
+        eit_gesture_draw_rock();
+    }
+    else if (ch == 's')
+    {
+        uart9_write_string("icon: scissors\r\n");
+        eit_gesture_draw_scissors();
+    }
+    else if (ch == 'p')
+    {
+        uart9_write_string("icon: paper\r\n");
+        eit_gesture_draw_paper();
+    }
+    else
+    {
+        uart9_write_string("usage: icon r|s|p  (rock/scissors/paper)\r\n");
     }
 }
 

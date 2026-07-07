@@ -78,6 +78,7 @@ set(PROJECT_SOURCES
     src/eit_lcd.c
     src/eit_lcd_panel_mipi2.c
     src/eit_ui.c
+    src/eit_gesture_icons.c
 )
 
 add_executable(${TARGET_NAME}.elf ${PROJECT_SOURCES})

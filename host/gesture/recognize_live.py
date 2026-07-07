@@ -315,6 +315,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-plot", action="store_true")
     p.add_argument("--threshold", type=float, default=0.6,
                    help="Confidence threshold for 'unknown'")
+    p.add_argument("--lcd", action="store_true",
+                   help="Send 'icon r|s|p' to MCU to update LCD on gesture change")
     return p.parse_args()
 
 
@@ -439,6 +441,13 @@ def recognize_live(args: argparse.Namespace) -> None:
                 f"{frame.valid:>6} {frame.ds_abs_p98:>10.5f}",
                 flush=True,
             )
+
+            # Update LCD if --lcd enabled
+            if args.lcd and label != "unknown":
+                gesture_to_icon = {"rock": "r", "scissors": "s", "paper": "p"}
+                icon_ch = gesture_to_icon.get(label.lower(), "")
+                if icon_ch:
+                    _write_command_mcu(ser, f"icon {icon_ch}")
 
             # Update visualization
             if viz is not None:

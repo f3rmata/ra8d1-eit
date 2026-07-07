@@ -1,0 +1,54 @@
+{
+  "accuracy": 0.9333333333333333,
+  "f1_macro": 0.9326599326599326,
+  "report": "              precision    recall  f1-score   support\n\n       paper       1.00      0.80      0.89        10\n        rock       1.00      1.00      1.00        10\n    scissors       0.83      1.00      0.91        10\n\n    accuracy                           0.93        30\n   macro avg       0.94      0.93      0.93        30\nweighted avg       0.94      0.93      0.93        30\n",
+  "confusion_matrix": [
+    [
+      8,
+      0,
+      2
+    ],
+    [
+      0,
+      10,
+      0
+    ],
+    [
+      0,
+      0,
+      10
+    ]
+  ],
+  "class_labels": [
+    "paper",
+    "rock",
+    "scissors"
+  ],
+  "per_class_f1": {
+    "paper": 0.8888888888888888,
+    "rock": 1.0,
+    "scissors": 0.9090909090909091
+  },
+  "feature_importances_top20": {
+    "elec_2_mean": 0.09050805449699675,
+    "q2_ventral_active": 0.06322979079748854,
+    "summary_ds_max": 0.047556250720072545,
+    "elec_4_mean": 0.047471201406618216,
+    "q1_radial_mean": 0.04568212511933557,
+    "q0_dorsal_absmax": 0.03651957885909697,
+    "q2_ventral_mean": 0.03136128756917198,
+    "global_std": 0.03131813196079037,
+    "elec_7_mean": 0.029262484624923573,
+    "elec_5_mean": 0.027294905452263707,
+    "ring_outer_std": 0.026928168256581977,
+    "centroid_x": 0.02639690507616452,
+    "elec_1_mean": 0.026095524973893718,
+    "elec_6_mean": 0.02594745019842264,
+    "ring_middle_std": 0.02455728444411089,
+    "centroid_y": 0.024451200590178097,
+    "global_kurtosis": 0.02412930857956815,
+    "q2_ventral_absmax": 0.022151938890111546,
+    "summary_ds_min": 0.020764833070646235,
+    "delta_l2": 0.019698831157302824
+  }
+}

@@ -24,6 +24,10 @@ typedef struct {
 } color_entry_t;
 
 #define CMAP_SIZE 256
+#define EIT_UI_DS_DEADZONE 0.1f
+#define EIT_UI_DS_DEADZONE_SOFT_EDGE 0.08f
+#define EIT_UI_DEADZONE_COLOR EIT_LCD_RGB565(34, 40, 58)
+#define EIT_UI_LOW_COLOR EIT_LCD_RGB565(22, 34, 64)
 static color_entry_t g_colormap[CMAP_SIZE];
 
 /*
@@ -50,11 +54,20 @@ static uint16_t lerp_rgb565(uint16_t a, uint16_t b, float t)
     return (uint16_t) (((uint16_t) r << 11) | ((uint16_t) g << 5) | (uint16_t) bl);
 }
 
+static float smoothstep(float edge0, float edge1, float x)
+{
+    float t = (x - edge0) / (edge1 - edge0);
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+
+    return t * t * (3.0f - 2.0f * t);
+}
+
 static void build_colormap(void)
 {
     /*
      * Four-point colormap:
-     *   0/0  → black  (0x0000)   — minimum
+     *   0/0  → dim blue          — minimum
      *   1/3  → blue   (0x001F)   — low
      *   2/3  → green  (0x07E0)   — mid
      *   3/3  → red    (0xF800)   — max
@@ -65,7 +78,7 @@ static void build_colormap(void)
 
         if (t < 0.333f)
         {
-            g_colormap[i].rgb565 = lerp_rgb565(0x0000, 0x001F, t / 0.333f);
+            g_colormap[i].rgb565 = lerp_rgb565(EIT_UI_LOW_COLOR, 0x001F, t / 0.333f);
         }
         else if (t < 0.667f)
         {
@@ -80,10 +93,16 @@ static void build_colormap(void)
 
 static uint16_t ds_to_color(float ds, float ds_min, float ds_max)
 {
+    float abs_ds = fabsf(ds);
+    if (abs_ds <= EIT_UI_DS_DEADZONE)
+    {
+        return EIT_UI_DEADZONE_COLOR;
+    }
+
     float range = ds_max - ds_min;
     if (range < 1.0e-9f)
     {
-        return g_colormap[0].rgb565;
+        return EIT_UI_DEADZONE_COLOR;
     }
 
     float t = (ds - ds_min) / range;
@@ -91,7 +110,43 @@ static uint16_t ds_to_color(float ds, float ds_min, float ds_max)
     if (t >= 1.0f) return g_colormap[CMAP_SIZE - 1].rgb565;
 
     int idx = (int) (t * (float) (CMAP_SIZE - 1));
-    return g_colormap[idx].rgb565;
+    uint16_t color = g_colormap[idx].rgb565;
+    if (abs_ds < (EIT_UI_DS_DEADZONE + EIT_UI_DS_DEADZONE_SOFT_EDGE))
+    {
+        float fade = smoothstep(EIT_UI_DS_DEADZONE,
+                                EIT_UI_DS_DEADZONE + EIT_UI_DS_DEADZONE_SOFT_EDGE,
+                                abs_ds);
+        color = lerp_rgb565(EIT_UI_DEADZONE_COLOR, color, fade);
+    }
+
+    return color;
+}
+
+static float ds_apply_deadzone(float ds)
+{
+    return (fabsf(ds) < EIT_UI_DS_DEADZONE) ? 0.0f : ds;
+}
+
+static void ds_display_range(const float ds_node[EIT_RECON_NODES], float *ds_min, float *ds_max)
+{
+    float min_value = 0.0f;
+    float max_value = 0.0f;
+
+    for (uint32_t node = 0U; node < EIT_RECON_NODES; node++)
+    {
+        float value = ds_apply_deadzone(ds_node[node]);
+        if (value < min_value)
+        {
+            min_value = value;
+        }
+        if (value > max_value)
+        {
+            max_value = value;
+        }
+    }
+
+    *ds_min = min_value;
+    *ds_max = max_value;
 }
 
 /* ---- Triangle rasterization ---- */
@@ -310,9 +365,10 @@ void eit_ui_show_recon_frame(const float ds_node[EIT_RECON_NODES],
                       HEATMAP_SIZE + 10, HEATMAP_SIZE + 10,
                       EIT_LCD_RGB565(16, 16, 32));
 
-    /* Compute ds range for colormap */
-    float ds_min = summary->ds_min;
-    float ds_max = summary->ds_max;
+    /* Compute display ds range after applying the LCD dead zone. */
+    float ds_min = 0.0f;
+    float ds_max = 0.0f;
+    ds_display_range(ds_node, &ds_min, &ds_max);
 
     /* Render each mesh element as a filled triangle */
     for (uint32_t elem = 0U; elem < EIT_RECON_ELEMENTS; elem++)
@@ -326,9 +382,9 @@ void eit_ui_show_recon_frame(const float ds_node[EIT_RECON_NODES],
             continue;
         }
 
-        float ds0 = ds_node[n0];
-        float ds1 = ds_node[n1];
-        float ds2 = ds_node[n2];
+        float ds0 = ds_apply_deadzone(ds_node[n0]);
+        float ds1 = ds_apply_deadzone(ds_node[n1]);
+        float ds2 = ds_apply_deadzone(ds_node[n2]);
         float ds_avg = (ds0 + ds1 + ds2) / 3.0f;
         uint16_t color = ds_to_color(ds_avg, ds_min, ds_max);
 
