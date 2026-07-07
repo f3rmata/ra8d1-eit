@@ -1,6 +1,9 @@
 #include "hal_data.h"
 #include "eit_board.h"
 #include "eit_recon.h"
+#include "eit_sdram.h"
+#include "eit_lcd.h"
+#include "eit_ui.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -105,6 +108,7 @@ static void command_reconfastbin(char * p);
 static void command_recon_common(char * p, bool fast);
 static void command_reconbase(char * p);
 static void command_recondump(void);
+static void command_lcdtest(char * p);
 static void command_raw(char * p, bool all_off_first);
 static void compute_scan_stat(uint16_t const * p_samples,
                               uint32_t samples,
@@ -185,6 +189,14 @@ void hal_entry(void)
         error_blink();
     }
     eit_recon_init();
+
+    /* Initialize SDRAM first (framebuffer storage) */
+    eit_sdram_init();
+
+    /* Initialize LCD subsystem */
+    eit_lcd_reset();
+    eit_lcd_init();
+    eit_ui_init();
 
     uart9_write_string("\r\nready\r\n");
     command_prompt();
@@ -355,6 +367,10 @@ static void process_line(char * p_line)
     {
         command_recondump();
     }
+    else if ((0 == strcmp(command, "lcd")) || (0 == strcmp(command, "lcdtest")))
+    {
+        command_lcdtest(p);
+    }
     else
     {
         uart9_write_string("bad command; use h\r\n");
@@ -385,6 +401,7 @@ static void print_help(void)
     uart9_write_string("  reconfastbin 8 256 20 200000 180 1   binary ds-only MCU-side JAC frame\r\n");
     uart9_write_string("  reconbase 8 N 256 20 200000 180 1    average N valid frames into RAM baseline\r\n");
     uart9_write_string("  recondump                             print reconstruction model metadata\r\n");
+    uart9_write_string("  lcd [color]                           LCD test: no arg=RGB cycle, arg=0xRRGGBB fill\r\n");
     eit_board_print_signals(uart9_write_string);
     uart9_write_string("\r\n");
 }
@@ -877,6 +894,10 @@ static void command_reconfastbin(char * p)
 
     recon_stats_to_vectors(stats, amp_v, valid, &retry_count);
     eit_recon_solve(amp_v, valid, retry_count, ds_node, &summary);
+
+    /* Display reconstruction result on LCD */
+    eit_ui_show_recon_frame(ds_node, &summary, g_frame_id);
+
     write_reconfast_binary_frame(g_frame_id, &summary, ds_node);
 }
 
@@ -930,6 +951,9 @@ static void command_recon_common(char * p, bool fast)
 
     recon_stats_to_vectors(stats, amp_v, valid, &retry_count);
     eit_recon_solve(amp_v, valid, retry_count, ds_node, &summary);
+
+    /* Display reconstruction result on LCD */
+    eit_ui_show_recon_frame(ds_node, &summary, g_frame_id);
 
     uart9_write_string(fast ? "RECONFAST_BEGIN," : "RECON_BEGIN,");
     uart9_write_u32(g_frame_id);
@@ -1090,6 +1114,43 @@ static void command_reconbase(char * p)
     uart9_write_string(",");
     uart9_write_u32(EIT_RECON_ROUTES - updated_routes);
     uart9_write_string("\r\n");
+}
+
+static void command_lcdtest(char * p)
+{
+    uint32_t color = 0U;
+    (void) parse_u32(&p, &color);
+
+    if (0U == color)
+    {
+        /* Cycle through RGB test screens */
+        uart9_write_string("lcd test: RED\r\n");
+        eit_ui_test_color(EIT_LCD_COLOR_RED);
+        R_BSP_SoftwareDelay(2000U, BSP_DELAY_UNITS_MILLISECONDS);
+
+        uart9_write_string("lcd test: GREEN\r\n");
+        eit_ui_test_color(EIT_LCD_COLOR_GREEN);
+        R_BSP_SoftwareDelay(2000U, BSP_DELAY_UNITS_MILLISECONDS);
+
+        uart9_write_string("lcd test: BLUE\r\n");
+        eit_ui_test_color(EIT_LCD_COLOR_BLUE);
+        R_BSP_SoftwareDelay(2000U, BSP_DELAY_UNITS_MILLISECONDS);
+
+        uart9_write_string("lcd test: BLACK\r\n");
+        eit_ui_test_color(EIT_LCD_COLOR_BLACK);
+        R_BSP_SoftwareDelay(1000U, BSP_DELAY_UNITS_MILLISECONDS);
+
+        eit_ui_init();
+        uart9_write_string("lcd test: done\r\n");
+    }
+    else
+    {
+        uart9_write_string("lcd fill: 0x");
+        uart9_write_hex2((uint8_t) ((color >> 8) & 0xFFU));
+        uart9_write_hex2((uint8_t) (color & 0xFFU));
+        uart9_write_string("\r\n");
+        eit_ui_test_color((uint16_t) color);
+    }
 }
 
 static void command_recondump(void)

@@ -10,10 +10,11 @@ It uses the existing MCU-side commands:
 - `recon electrodes samples settle_ms rate pp_limit retries`
 - `reconfast electrodes samples settle_ms rate pp_limit retries`
 
-Recommended bridge mode:
+Recommended bridge mode. This defaults to host-side pyEIT/JAC reconstruction
+from `scanstat` frames:
 
 ```bash
-python3 host/web-eit/serial_bridge.py --serial-port /dev/ttyACM0 --baud 460800
+.venv/bin/python3 host/web-eit/serial_bridge.py --serial-port /dev/ttyACM0 --baud 460800
 ```
 
 Open:
@@ -23,7 +24,20 @@ http://127.0.0.1:8765/?bridge=1
 ```
 
 The first live frame uses `recon` to receive node coordinates; later frames can
-use `reconfast` and reuse those coordinates.
+use `reconfast` and reuse those coordinates. In host solver mode the bridge
+intercepts those commands, captures `scanstat`, computes pyEIT on the host, and
+emits compatible `RECON...` lines to the browser.
+
+MCU-side reconstruction mode:
+
+```bash
+.venv/bin/python3 host/web-eit/serial_bridge.py --solver mcu --serial-port /dev/ttyACM0 --baud 460800
+```
+
+In MCU mode, `reconfast` is mapped to the newer `reconfastbin` protocol by
+default and the bridge converts the binary frame back to browser-compatible
+`RECONFAST...` lines. Use `--mcu-fast text` to keep the older text
+`reconfast` command.
 
 Direct Web Serial mode is still available, but ART-Link CMSIS-DAP CDC devices
 can be less stable in browser-owned serial sessions:

@@ -310,3 +310,33 @@ label {
     max-height: 280px;
   }
 }
+
+/* Gesture indicator */
+.gesture-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  margin: 8px 0;
+  border: 2px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  transition: all 0.3s ease;
+}
+.gesture-bar .gesture-label {
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.gesture-bar strong {
+  font-size: 22px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.gesture-bar .gesture-conf {
+  font-size: 16px;
+  font-weight: 600;
+  margin-left: auto;
+}

@@ -26,6 +26,9 @@ set(MCU_FLAGS
     -mcpu=cortex-m85+nopacbti
 )
 
+# Collect D/AVE 2D GPU sources
+file(GLOB DAVE2D_SOURCES ra/tes/dave2d/src/*.c)
+
 set(PROJECT_SOURCES
     ra/fsp/src/bsp/cmsis/Device/RENESAS/Source/startup.c
     ra/fsp/src/bsp/cmsis/Device/RENESAS/Source/system.c
@@ -48,17 +51,33 @@ set(PROJECT_SOURCES
     ra/fsp/src/r_dmac/r_dmac.c
     ra/fsp/src/r_gpt/r_gpt.c
     ra/fsp/src/r_sci_b_spi/r_sci_b_spi.c
+    ra/fsp/src/r_sci_b_i2c/r_sci_b_i2c.c
     ra/fsp/src/r_sci_b_uart/r_sci_b_uart.c
+    # LCD/Display FSP drivers (from SDK)
+    ra/fsp/src/r_glcdc/r_glcdc.c
+    ra/fsp/src/r_mipi_dsi/r_mipi_dsi.c
+    ra/fsp/src/r_mipi_phy/r_mipi_phy.c
+    ra/fsp/src/r_drw/r_drw_base.c
+    ra/fsp/src/r_drw/r_drw_irq.c
+    ra/fsp/src/r_drw/r_drw_memory.c
+    ${DAVE2D_SOURCES}
+    # Generated FSP configuration
     ra_gen/common_data.c
     ra_gen/hal_data.c
     ra_gen/main.c
     ra_gen/pin_data.c
     ra_gen/vector_data.c
+    # EIT application
     src/eit_board.c
     src/eit_recon.c
     src/eit_recon_model.c
     src/hal_entry.c
     src/hal_warmstart.c
+    # LCD subsystem (bare-metal, ported from RT-Thread SDK)
+    src/eit_sdram.c
+    src/eit_lcd.c
+    src/eit_lcd_panel_mipi2.c
+    src/eit_ui.c
 )
 
 add_executable(${TARGET_NAME}.elf ${PROJECT_SOURCES})
@@ -76,6 +95,11 @@ target_include_directories(${TARGET_NAME}.elf PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ra/fsp/inc/api
     ${CMAKE_CURRENT_SOURCE_DIR}/ra/fsp/inc/instances
     ${CMAKE_CURRENT_SOURCE_DIR}/ra/arm/CMSIS_6/CMSIS/Core/Include
+    # D/AVE 2D GPU headers
+    ${CMAKE_CURRENT_SOURCE_DIR}/ra/tes/dave2d/inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/ra/tes/dave2d/src
+    # DRW FSP driver headers
+    ${CMAKE_CURRENT_SOURCE_DIR}/ra/fsp/src/r_drw
 )
 
 target_compile_definitions(${TARGET_NAME}.elf PRIVATE

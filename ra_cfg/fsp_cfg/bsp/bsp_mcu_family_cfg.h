@@ -95,7 +95,7 @@
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 19) /* SPI0 */ | \
             (((1 > 0) ? 0U : 1U) << 22) /* SCI9 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 27) /* SCI4 */ | \
-            (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 28) /* SCI3 */ | \
+            (((1 > 0) ? 0U : 1U) << 28) /* SCI3 */ | \
             (((1 > 0) ? 0U : 1U) << 29) /* SCI2 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 30) /* SCI1 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 31) /* SCI0 */)
@@ -109,7 +109,7 @@
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 11) /* SDHI1 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 12) /* SDHI0 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 13) /* DOC */ | \
-            (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 15) /* GLCDC/MIPI-DSI/DRW */ | \
+            (((1 > 0) ? 0U : 1U) << 15) /* GLCDC/MIPI-DSI/DRW */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 16) /* CEU */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 26) /* CANFD1 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 27) /* CANFD0 */ | \
@@ -144,7 +144,7 @@
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 22) /* GPT9 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 23) /* GPT8 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 24) /* GPT7 */ | \
-            (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 25) /* GPT6 */ | \
+            (((1 > 0) ? 0U : 1U) << 25) /* GPT6 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 26) /* GPT5 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 27) /* GPT4 */ | \
             (((RA_NOT_DEFINED > 0) ? 0U : 1U) << 28) /* GPT3 */ | \

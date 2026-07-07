@@ -39,6 +39,9 @@ const ui = {
   gridInput: $("gridInput"),
   labelsInput: $("labelsInput"),
   rawLogInput: $("rawLogInput"),
+  gestureBar: $("gestureBar"),
+  gestureName: $("gestureName"),
+  gestureConf: $("gestureConf"),
 };
 
 const state = {
@@ -53,6 +56,7 @@ const state = {
   connected: false,
   running: false,
   busy: false,
+  operationInFlight: false,
   templateNodes: null,
   lastFrame: null,
 };
@@ -214,6 +218,10 @@ async function connectBridge() {
 
   setBusy(true);
   try {
+    if (state.eventSource) {
+      state.eventSource.close();
+      state.eventSource = null;
+    }
     state.lineQueue = [];
     state.receiveBuffer = "";
     state.eventSource = new EventSource("/events");
@@ -228,6 +236,8 @@ async function connectBridge() {
         logLine(payload.line, "tx");
       } else if (payload.type === "status") {
         setStatus(payload.text, "ok");
+      } else if (payload.type === "gesture") {
+        showGesture(payload.label, payload.confidence, payload.all_probas);
       } else if (payload.type === "error") {
         setStatus(`桥接错误: ${payload.text}`, "error");
       }
@@ -555,12 +565,17 @@ async function initBoard() {
 }
 
 async function captureBaseline() {
+  if (state.operationInFlight || state.running) {
+    return;
+  }
+  state.operationInFlight = true;
   setBusy(true);
   try {
     await doBaseline();
   } catch (error) {
     setStatus(`基线失败: ${error.message}`, "error");
   } finally {
+    state.operationInFlight = false;
     setBusy(false);
   }
 }
@@ -583,15 +598,15 @@ async function doBaseline() {
     if (!cleaned) {
       continue;
     }
+    if (cleaned.startsWith("ERR:") || cleaned.startsWith("bad command")) {
+      throw new Error(cleaned);
+    }
     if (!started) {
       if (cleaned.startsWith("RECONBASE_BEGIN,")) {
         started = true;
       } else {
         continue;
       }
-    }
-    if (cleaned.startsWith("ERR:")) {
-      throw new Error(cleaned);
     }
     if (cleaned.startsWith("RECONBASE_FRAME,")) {
       const parts = cleaned.split(",");
@@ -606,6 +621,10 @@ async function doBaseline() {
 }
 
 async function startLoop() {
+  if (state.operationInFlight || state.running) {
+    return;
+  }
+  state.operationInFlight = true;
   state.running = true;
   state.templateNodes = null;
   updateButtons();
@@ -633,6 +652,7 @@ async function startLoop() {
     }
   } finally {
     state.running = false;
+    state.operationInFlight = false;
     updateButtons();
   }
 }
@@ -658,7 +678,8 @@ async function captureReconFrame() {
   let expectedNodes = null;
   let summary = null;
   let readingNodes = false;
-  const nodes = [];
+  let nodes = [];
+  let nodesByIndex = new Map();
 
   while (performance.now() < deadline) {
     const line = await readLine(Math.max(1, deadline - performance.now()));
@@ -670,6 +691,9 @@ async function captureReconFrame() {
     if (!cleaned) {
       continue;
     }
+    if (cleaned.startsWith("ERR:") || cleaned.startsWith("bad command")) {
+      throw new Error(cleaned);
+    }
     if (!started) {
       if (cleaned.startsWith("RECON_BEGIN,")) {
         started = true;
@@ -677,15 +701,17 @@ async function captureReconFrame() {
         continue;
       }
     }
-    if (cleaned.startsWith("ERR:") || cleaned.startsWith("bad command")) {
-      throw new Error(cleaned);
-    }
     if (cleaned.startsWith("RECON_BEGIN,")) {
       const parts = cleaned.split(",");
+      started = true;
       frameId = Number(parts[1]);
       electrodes = Number(parts[2]);
       routes = Number(parts[3]);
       expectedNodes = Number(parts[4]);
+      summary = null;
+      readingNodes = false;
+      nodes = [];
+      nodesByIndex = new Map();
       continue;
     }
     if (cleaned.startsWith("RECON_SUMMARY,")) {
@@ -700,6 +726,7 @@ async function captureReconFrame() {
       if (frameId === null || expectedNodes === null || summary === null) {
         throw new Error("RECON_DONE before complete metadata");
       }
+      nodes = Array.from(nodesByIndex.values());
       if (nodes.length !== expectedNodes) {
         throw new Error(`节点数不完整: got ${nodes.length}, expected ${expectedNodes}`);
       }
@@ -709,8 +736,9 @@ async function captureReconFrame() {
     if (readingNodes) {
       const parts = cleaned.split(",");
       if (parts.length === 4) {
-        nodes.push({
-          index: Number(parts[0]),
+        const index = Number(parts[0]);
+        nodesByIndex.set(index, {
+          index,
           x: Number(parts[1]),
           y: Number(parts[2]),
           ds: Number(parts[3]),
@@ -747,6 +775,9 @@ async function captureReconFastFrame(templateNodes) {
     if (!cleaned) {
       continue;
     }
+    if (cleaned.startsWith("ERR:") || cleaned.startsWith("bad command")) {
+      throw new Error(cleaned);
+    }
     if (!started) {
       if (cleaned.startsWith("RECONFAST_BEGIN,")) {
         started = true;
@@ -754,15 +785,15 @@ async function captureReconFastFrame(templateNodes) {
         continue;
       }
     }
-    if (cleaned.startsWith("ERR:") || cleaned.startsWith("bad command")) {
-      throw new Error(cleaned);
-    }
     if (cleaned.startsWith("RECONFAST_BEGIN,")) {
       const parts = cleaned.split(",");
+      started = true;
       frameId = Number(parts[1]);
       electrodes = Number(parts[2]);
       routes = Number(parts[3]);
       expectedNodes = Number(parts[4]);
+      summary = null;
+      dsValues = null;
       continue;
     }
     if (cleaned.startsWith("RECON_SUMMARY,")) {
@@ -811,6 +842,38 @@ function setFrameStats(frame) {
 
 function formatSci(value) {
   return Number.isFinite(value) ? value.toExponential(3) : "-";
+}
+
+function showGesture(label, confidence, allProbas) {
+  if (!ui.gestureBar || !ui.gestureName || !ui.gestureConf) return;
+  ui.gestureBar.style.display = "flex";
+  if (label === "unknown") {
+    ui.gestureName.textContent = "?";
+    ui.gestureName.style.color = "#95a5a6";
+    ui.gestureConf.textContent = `(${(confidence * 100).toFixed(0)}%)`;
+    ui.gestureConf.style.color = "#95a5a6";
+    ui.gestureBar.style.background = "#ecf0f1";
+    ui.gestureBar.style.borderColor = "#bdc3c7";
+  } else {
+    ui.gestureName.textContent = label;
+    ui.gestureConf.textContent = `${(confidence * 100).toFixed(0)}%`;
+    if (confidence >= 0.8) {
+      ui.gestureName.style.color = "#27ae60";
+      ui.gestureConf.style.color = "#27ae60";
+      ui.gestureBar.style.background = "#d5f5e3";
+      ui.gestureBar.style.borderColor = "#27ae60";
+    } else if (confidence >= 0.6) {
+      ui.gestureName.style.color = "#e67e22";
+      ui.gestureConf.style.color = "#e67e22";
+      ui.gestureBar.style.background = "#fdebd0";
+      ui.gestureBar.style.borderColor = "#e67e22";
+    } else {
+      ui.gestureName.style.color = "#95a5a6";
+      ui.gestureConf.style.color = "#95a5a6";
+      ui.gestureBar.style.background = "#ecf0f1";
+      ui.gestureBar.style.borderColor = "#bdc3c7";
+    }
+  }
 }
 
 function drawFrame(frame) {
@@ -988,10 +1051,14 @@ function percentile(values, p) {
 }
 
 async function sendManualCommand() {
+  if (state.operationInFlight || state.running) {
+    return;
+  }
   const command = ui.commandInput.value.trim();
   if (!command) {
     return;
   }
+  state.operationInFlight = true;
   setBusy(true);
   try {
     await drainIdle();
@@ -1000,6 +1067,7 @@ async function sendManualCommand() {
   } catch (error) {
     setStatus(`发送失败: ${error.message}`, "error");
   } finally {
+    state.operationInFlight = false;
     setBusy(false);
   }
 }

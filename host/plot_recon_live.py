@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rate", type=int, default=200000)
     parser.add_argument("--pp-limit", type=int, default=180)
     parser.add_argument("--retries", type=int, default=1)
-    parser.add_argument("--baseline-frames", type=int, default=0, help="send reconbase before live plotting; 0 skips")
+    parser.add_argument("--baseline-frames", type=int, default=5, help="send reconbase before live plotting; 0 uses firmware baseline")
     parser.add_argument("--baseline-samples", type=int, default=256)
     parser.add_argument("--baseline-settle-ms", type=int, default=20)
     parser.add_argument("--baseline-rate", type=int, default=200000)

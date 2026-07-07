@@ -1,2 +1,4 @@
 pyeit
 pyserial
+scikit-learn
+joblib

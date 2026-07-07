@@ -45,7 +45,7 @@
     <node id="board.clock.sciclk.source" option="board.clock.sciclk.source.pll1p"/>
     <node id="board.clock.spiclk.source" option="board.clock.spiclk.source.pll1p"/>
     <node id="board.clock.canfdclk.source" option="board.clock.canfdclk.source.disabled"/>
-    <node id="board.clock.lcdclk.source" option="board.clock.lcdclk.source.disabled"/>
+    <node id="board.clock.lcdclk.source" option="board.clock.lcdclk.source.pll1p"/>
     <node id="board.clock.i3cclk.source" option="board.clock.i3cclk.source.disabled"/>
     <node id="board.clock.uck.source" option="board.clock.uck.source.disabled"/>
     <node id="board.clock.u60ck.source" option="board.clock.u60ck.source.disabled"/>
@@ -94,8 +94,10 @@
   </raClockConfiguration>
   <raPinConfiguration>
     <pincfg active="true" name="" symbol="">
+      <configSetting altId="gpt6.gtioc6a.p601" configurationId="gpt6.gtioc6a" isUsedByDriver="true" peripheral="GPT6"/>
       <configSetting altId="jtag_fslash_swd.swclk.p211" configurationId="jtag_fslash_swd.swclk" peripheral="JTAG/SWD"/>
       <configSetting altId="jtag_fslash_swd.swdio.p210" configurationId="jtag_fslash_swd.swdio" peripheral="JTAG/SWD"/>
+      <configSetting altId="mipi.dsi_te.p206" configurationId="mipi.dsi_te" peripheral="MIPI"/>
       <configSetting altId="p001.input" configurationId="p001"/>
       <configSetting altId="p002.input" configurationId="p002"/>
       <configSetting altId="p003.input" configurationId="p003"/>
@@ -121,8 +123,18 @@
       <configSetting altId="sci2.rxd2.pa02" configurationId="sci2.rxd2" isUsedByDriver="true" peripheral="SCI2"/>
       <configSetting altId="sci2.sck2.pa04" configurationId="sci2.sck2" isUsedByDriver="true" peripheral="SCI2"/>
       <configSetting altId="sci2.txd2.pa03" configurationId="sci2.txd2" isUsedByDriver="true" peripheral="SCI2"/>
+      <configSetting altId="sci3.rxd3.p309" configurationId="sci3.rxd3" isUsedByDriver="true" peripheral="SCI3"/>
+      <configSetting altId="sci3.txd3.p310" configurationId="sci3.txd3" isUsedByDriver="true" peripheral="SCI3"/>
       <configSetting altId="sci9.rxd9.p208" configurationId="sci9.rxd9" isUsedByDriver="true" peripheral="SCI9"/>
       <configSetting altId="sci9.txd9.p209" configurationId="sci9.txd9" isUsedByDriver="true" peripheral="SCI9"/>
+      <configSetting altId="sdram.a0.p112" configurationId="sdram.a0" peripheral="SDRAM"/>
+      <configSetting altId="sdram.a1.p300" configurationId="sdram.a1" peripheral="SDRAM"/>
+      <configSetting altId="sdram.a2.p301" configurationId="sdram.a2" peripheral="SDRAM"/>
+      <configSetting altId="sdram.a3.p302" configurationId="sdram.a3" peripheral="SDRAM"/>
+      <configSetting altId="sdram.ras.p908" configurationId="sdram.ras" peripheral="SDRAM"/>
+      <configSetting altId="sdram.sdclk.pa09" configurationId="sdram.sdclk" peripheral="SDRAM"/>
+      <configSetting altId="sdram.sdcs.p115" configurationId="sdram.sdcs" peripheral="SDRAM"/>
+      <configSetting altId="sdram.we.p114" configurationId="sdram.we" peripheral="SDRAM"/>
     </pincfg>
   </raPinConfiguration>
 </raConfiguration>
