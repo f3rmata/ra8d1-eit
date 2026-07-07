@@ -1,5 +1,6 @@
 #include "hal_data.h"
 #include "eit_board.h"
+#include "eit_recon.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -41,6 +42,9 @@ bsp_ipc_semaphore_handle_t g_core_start_semaphore =
 #define SCAN_RMS_FRAME_FLOOR    (30U)
 #define SCAN_EXCITE_HZ          (10000U)
 #define SCAN_PI                 (3.14159265358979323846)
+#define SCAN_ADC_VREF           (2.5f)
+#define SCAN_SQRT2              (1.4142135623730950488f)
+#define SCAN_RMS_MILLI_TO_AMP_V (SCAN_ADC_VREF * SCAN_SQRT2 / (1023.0f * 1000.0f))
 
 typedef struct st_scan_stat
 {
@@ -63,7 +67,10 @@ typedef struct st_scan_stat
 
 static void uart9_write_string(char const * p_text);
 static void uart9_write_u32(uint32_t value);
+static void uart9_write_i32(int32_t value);
+static void uart9_write_u32_padded(uint32_t value, uint32_t width);
 static void uart9_write_fixed3(uint32_t milli);
+static void uart9_write_float(float value);
 static void uart9_write_hex2(uint8_t value);
 static void error_blink(void);
 static void print_help(void);
@@ -75,6 +82,9 @@ static void command_prompt(void);
 static void command_adc(char * p);
 static void command_scanraw(char * p);
 static void command_scanstat(char * p);
+static void command_recon(char * p);
+static void command_reconbase(char * p);
+static void command_recondump(void);
 static void command_raw(char * p, bool all_off_first);
 static void compute_scan_stat(uint16_t const * p_samples,
                               uint32_t samples,
@@ -91,6 +101,18 @@ static bool capture_scan_stat(uint16_t * p_samples,
 static void apply_frame_outlier_filter(scan_stat_t * p_stats, uint32_t count);
 static int compare_u32(const void * p_a, const void * p_b);
 static bool route_is_valid(scan_stat_t const * p_stat);
+static bool route_is_recon_valid(scan_stat_t const * p_stat);
+static float scan_stat_amp_v(scan_stat_t const * p_stat);
+static bool capture_recon_stats(uint32_t samples,
+                                uint32_t rate,
+                                uint32_t settle_ms,
+                                uint32_t pp_limit,
+                                uint32_t retries,
+                                scan_stat_t stats[EIT_RECON_ROUTES]);
+static void recon_stats_to_vectors(scan_stat_t const stats[EIT_RECON_ROUTES],
+                                   float amp_v[EIT_RECON_ROUTES],
+                                   bool valid[EIT_RECON_ROUTES],
+                                   uint32_t * p_retry_count);
 static void led_heartbeat(void);
 
 static volatile bool g_uart9_tx_complete = false;
@@ -125,6 +147,7 @@ void hal_entry(void)
         uart9_write_string("EIT GPIO init failed\r\n");
         error_blink();
     }
+    eit_recon_init();
 
     uart9_write_string("\r\nready\r\n");
     print_help();
@@ -272,6 +295,18 @@ static void process_line(char * p_line)
     {
         command_scanstat(p);
     }
+    else if (0 == strcmp(command, "recon"))
+    {
+        command_recon(p);
+    }
+    else if (0 == strcmp(command, "reconbase"))
+    {
+        command_reconbase(p);
+    }
+    else if (0 == strcmp(command, "recondump"))
+    {
+        command_recondump();
+    }
     else
     {
         uart9_write_string("bad command; use h\r\n");
@@ -296,6 +331,9 @@ static void print_help(void)
     uart9_write_string("  adc [samples] [rate_hz]    Port0 timed ADC capture\r\n");
     uart9_write_string("  scanraw [elec] [samples] [settle_ms] [rate_hz] [pp_limit] [retries]\r\n");
     uart9_write_string("  scanstat [elec] [samples] [settle_ms] [rate_hz] [pp_limit] [retries] [progress]\r\n");
+    uart9_write_string("  recon 8 256 20 200000 180 1          one MCU-side JAC frame\r\n");
+    uart9_write_string("  reconbase 8 N 256 20 200000 180 1    average N valid frames into RAM baseline\r\n");
+    uart9_write_string("  recondump                             print reconstruction model metadata\r\n");
     eit_board_print_signals(uart9_write_string);
     uart9_write_string("\r\n");
 }
@@ -654,6 +692,287 @@ static void command_scanstat(char * p)
     uart9_write_string("STAT_DONE\r\n");
 }
 
+static void command_recon(char * p)
+{
+    uint32_t electrodes = EIT_RECON_ELECTRODES;
+    uint32_t samples = 256U;
+    uint32_t settle_ms = 20U;
+    uint32_t rate = 200000U;
+    uint32_t pp_limit = SCAN_DEFAULT_PP_LIMIT;
+    uint32_t retries = SCAN_DEFAULT_RETRIES;
+    (void) parse_u32(&p, &electrodes);
+    (void) parse_u32(&p, &samples);
+    (void) parse_u32(&p, &settle_ms);
+    (void) parse_u32(&p, &rate);
+    (void) parse_u32(&p, &pp_limit);
+    (void) parse_u32(&p, &retries);
+
+    if (electrodes != EIT_RECON_ELECTRODES)
+    {
+        uart9_write_string("ERR: recon model supports exactly 8 electrodes\r\n");
+        return;
+    }
+    if (samples < 1U)
+    {
+        samples = 1U;
+    }
+    if (samples > ADC_MAX_SAMPLES)
+    {
+        samples = ADC_MAX_SAMPLES;
+    }
+    if (retries > 3U)
+    {
+        retries = 3U;
+    }
+
+    static scan_stat_t stats[EIT_RECON_ROUTES];
+    static float amp_v[EIT_RECON_ROUTES];
+    static bool valid[EIT_RECON_ROUTES];
+    static float ds_node[EIT_RECON_NODES];
+    uint32_t retry_count = 0U;
+    eit_recon_summary_t summary;
+
+    g_frame_id++;
+    if (!capture_recon_stats(samples, rate, settle_ms, pp_limit, retries, stats))
+    {
+        eit_mux_all_off();
+        uart9_write_string("ERR: recon capture failed\r\n");
+        return;
+    }
+
+    recon_stats_to_vectors(stats, amp_v, valid, &retry_count);
+    eit_recon_solve(amp_v, valid, retry_count, ds_node, &summary);
+
+    uart9_write_string("RECON_BEGIN,");
+    uart9_write_u32(g_frame_id);
+    uart9_write_string(",");
+    uart9_write_u32(EIT_RECON_ELECTRODES);
+    uart9_write_string(",");
+    uart9_write_u32(EIT_RECON_ROUTES);
+    uart9_write_string(",");
+    uart9_write_u32(EIT_RECON_NODES);
+    uart9_write_string("\r\n");
+
+    uart9_write_string("RECON_SUMMARY,");
+    uart9_write_u32(summary.valid_count);
+    uart9_write_string(",");
+    uart9_write_u32(summary.invalid_count);
+    uart9_write_string(",");
+    uart9_write_u32(summary.retry_count);
+    uart9_write_string(",");
+    uart9_write_float(summary.ds_min);
+    uart9_write_string(",");
+    uart9_write_float(summary.ds_max);
+    uart9_write_string(",");
+    uart9_write_float(summary.ds_abs_p98);
+    uart9_write_string(",");
+    uart9_write_float(summary.rel_l2);
+    uart9_write_string("\r\n");
+
+    uart9_write_string("node,x,y,ds\r\n");
+    for (uint32_t node = 0U; node < EIT_RECON_NODES; node++)
+    {
+        uart9_write_u32(node);
+        uart9_write_string(",");
+        uart9_write_float(g_eit_recon_node_xy[node][0]);
+        uart9_write_string(",");
+        uart9_write_float(g_eit_recon_node_xy[node][1]);
+        uart9_write_string(",");
+        uart9_write_float(ds_node[node]);
+        uart9_write_string("\r\n");
+        led_heartbeat();
+    }
+    uart9_write_string("RECON_DONE\r\n");
+}
+
+static void command_reconbase(char * p)
+{
+    uint32_t electrodes = EIT_RECON_ELECTRODES;
+    uint32_t frames = 5U;
+    uint32_t samples = 256U;
+    uint32_t settle_ms = 20U;
+    uint32_t rate = 200000U;
+    uint32_t pp_limit = SCAN_DEFAULT_PP_LIMIT;
+    uint32_t retries = SCAN_DEFAULT_RETRIES;
+    (void) parse_u32(&p, &electrodes);
+    (void) parse_u32(&p, &frames);
+    (void) parse_u32(&p, &samples);
+    (void) parse_u32(&p, &settle_ms);
+    (void) parse_u32(&p, &rate);
+    (void) parse_u32(&p, &pp_limit);
+    (void) parse_u32(&p, &retries);
+
+    if (electrodes != EIT_RECON_ELECTRODES)
+    {
+        uart9_write_string("ERR: recon model supports exactly 8 electrodes\r\n");
+        return;
+    }
+    if (frames < 1U)
+    {
+        frames = 1U;
+    }
+    if (samples < 1U)
+    {
+        samples = 1U;
+    }
+    if (samples > ADC_MAX_SAMPLES)
+    {
+        samples = ADC_MAX_SAMPLES;
+    }
+    if (retries > 3U)
+    {
+        retries = 3U;
+    }
+
+    static scan_stat_t stats[EIT_RECON_ROUTES];
+    static float amp_v[EIT_RECON_ROUTES];
+    static bool valid[EIT_RECON_ROUTES];
+    eit_recon_baseline_accum_clear();
+
+    uart9_write_string("RECONBASE_BEGIN,");
+    uart9_write_u32(frames);
+    uart9_write_string(",");
+    uart9_write_u32(EIT_RECON_ROUTES);
+    uart9_write_string("\r\n");
+
+    for (uint32_t frame = 0U; frame < frames; frame++)
+    {
+        uint32_t retry_count = 0U;
+        uint32_t valid_count = 0U;
+        uint32_t invalid_count = 0U;
+        g_frame_id++;
+        if (!capture_recon_stats(samples, rate, settle_ms, pp_limit, retries, stats))
+        {
+            eit_mux_all_off();
+            uart9_write_string("ERR: reconbase capture failed\r\n");
+            return;
+        }
+
+        recon_stats_to_vectors(stats, amp_v, valid, &retry_count);
+        eit_recon_baseline_accum_add(amp_v, valid);
+        for (uint32_t route = 0U; route < EIT_RECON_ROUTES; route++)
+        {
+            if (valid[route])
+            {
+                valid_count++;
+            }
+            else
+            {
+                invalid_count++;
+            }
+        }
+
+        uart9_write_string("RECONBASE_FRAME,");
+        uart9_write_u32(g_frame_id);
+        uart9_write_string(",");
+        uart9_write_u32(valid_count);
+        uart9_write_string(",");
+        uart9_write_u32(invalid_count);
+        uart9_write_string(",");
+        uart9_write_u32(retry_count);
+        uart9_write_string("\r\n");
+    }
+
+    if (!eit_recon_baseline_accum_commit())
+    {
+        uart9_write_string("ERR: reconbase missing valid route; keep previous baseline\r\n");
+        return;
+    }
+
+    uart9_write_string("RECONBASE_DONE,");
+    uart9_write_u32(frames);
+    uart9_write_string(",ram\r\n");
+}
+
+static void command_recondump(void)
+{
+    uart9_write_string("RECONDUMP,");
+    uart9_write_string(EIT_RECON_MODEL_VERSION);
+    uart9_write_string(",");
+    uart9_write_u32(EIT_RECON_ELECTRODES);
+    uart9_write_string(",");
+    uart9_write_u32(EIT_RECON_ROUTES);
+    uart9_write_string(",");
+    uart9_write_u32(EIT_RECON_NODES);
+    uart9_write_string(",");
+    uart9_write_u32(EIT_RECON_ELEMENTS);
+    uart9_write_string(",");
+    uart9_write_string(eit_recon_baseline_is_ram() ? "ram" : "flash");
+    uart9_write_string(",");
+    uart9_write_string(eit_recon_active_baseline_source());
+    uart9_write_string("\r\n");
+}
+
+static bool capture_recon_stats(uint32_t samples,
+                                uint32_t rate,
+                                uint32_t settle_ms,
+                                uint32_t pp_limit,
+                                uint32_t retries,
+                                scan_stat_t stats[EIT_RECON_ROUTES])
+{
+    static uint16_t decoded[ADC_MAX_SAMPLES];
+    uint32_t route_index = 0U;
+
+    for (uint32_t src = 0U; src < EIT_RECON_ELECTRODES; src++)
+    {
+        uint32_t sink = (src + 1U) % EIT_RECON_ELECTRODES;
+        for (uint32_t vp = 0U; vp < EIT_RECON_ELECTRODES; vp++)
+        {
+            uint32_t vn = (vp + 1U) % EIT_RECON_ELECTRODES;
+            if ((vp == src) || (vp == sink) || (vn == src) || (vn == sink))
+            {
+                continue;
+            }
+            if ((route_index >= EIT_RECON_ROUTES) ||
+                !eit_recon_route_matches(route_index, src, sink, vp, vn))
+            {
+                uart9_write_string("ERR: recon model route order mismatch\r\n");
+                return false;
+            }
+
+            scan_stat_t * p_stat = &stats[route_index];
+            memset(p_stat, 0, sizeof(*p_stat));
+            p_stat->route_index = route_index;
+            p_stat->src = src;
+            p_stat->sink = sink;
+            p_stat->vp = vp;
+            p_stat->vn = vn;
+
+            if (!capture_scan_stat(decoded, samples, rate, settle_ms, pp_limit, retries, p_stat))
+            {
+                return false;
+            }
+            eit_mux_all_off();
+            route_index++;
+            led_heartbeat();
+        }
+    }
+
+    if (route_index != EIT_RECON_ROUTES)
+    {
+        uart9_write_string("ERR: recon route count mismatch\r\n");
+        return false;
+    }
+
+    apply_frame_outlier_filter(stats, EIT_RECON_ROUTES);
+    return true;
+}
+
+static void recon_stats_to_vectors(scan_stat_t const stats[EIT_RECON_ROUTES],
+                                   float amp_v[EIT_RECON_ROUTES],
+                                   bool valid[EIT_RECON_ROUTES],
+                                   uint32_t * p_retry_count)
+{
+    uint32_t retry_count = 0U;
+    for (uint32_t route = 0U; route < EIT_RECON_ROUTES; route++)
+    {
+        amp_v[route] = scan_stat_amp_v(&stats[route]);
+        valid[route] = route_is_recon_valid(&stats[route]);
+        retry_count += stats[route].retry_count;
+    }
+    *p_retry_count = retry_count;
+}
+
 static bool capture_scan_stat(uint16_t * p_samples,
                               uint32_t samples,
                               uint32_t rate,
@@ -847,6 +1166,16 @@ static bool route_is_valid(scan_stat_t const * p_stat)
     return (p_stat->flags == 0U);
 }
 
+static bool route_is_recon_valid(scan_stat_t const * p_stat)
+{
+    return (p_stat->flags == 0U) && (p_stat->raw_flags == 0U) && (p_stat->overrange_count == 0U);
+}
+
+static float scan_stat_amp_v(scan_stat_t const * p_stat)
+{
+    return (float) p_stat->rms_milli * SCAN_RMS_MILLI_TO_AMP_V;
+}
+
 static int compare_u32(const void * p_a, const void * p_b)
 {
     uint32_t a = *(uint32_t const *) p_a;
@@ -959,6 +1288,35 @@ static void uart9_write_u32(uint32_t value)
     uart9_write_string(text);
 }
 
+static void uart9_write_i32(int32_t value)
+{
+    if (value < 0)
+    {
+        uart9_write_string("-");
+        uart9_write_u32((uint32_t) (-value));
+    }
+    else
+    {
+        uart9_write_u32((uint32_t) value);
+    }
+}
+
+static void uart9_write_u32_padded(uint32_t value, uint32_t width)
+{
+    uint32_t divisor = 1U;
+    for (uint32_t i = 1U; i < width; i++)
+    {
+        divisor *= 10U;
+    }
+
+    while ((divisor > 1U) && (value < divisor))
+    {
+        uart9_write_string("0");
+        divisor /= 10U;
+    }
+    uart9_write_u32(value);
+}
+
 static void uart9_write_fixed3(uint32_t milli)
 {
     uart9_write_u32(milli / 1000U);
@@ -967,6 +1325,68 @@ static void uart9_write_fixed3(uint32_t milli)
     uart9_write_string((frac < 100U) ? "0" : "");
     uart9_write_string((frac < 10U) ? "0" : "");
     uart9_write_u32(frac);
+}
+
+static void uart9_write_float(float value)
+{
+    if (isnan(value))
+    {
+        uart9_write_string("nan");
+        return;
+    }
+    if (isinf(value))
+    {
+        uart9_write_string((value < 0.0f) ? "-inf" : "inf");
+        return;
+    }
+
+    if (value < 0.0f)
+    {
+        uart9_write_string("-");
+        value = -value;
+    }
+
+    if (fabsf(value) < 1.0e-38f)
+    {
+        uart9_write_string("0.0000000e+00");
+        return;
+    }
+
+    int32_t exponent = 0;
+    while (value >= 10.0f)
+    {
+        value *= 0.1f;
+        exponent++;
+    }
+    while (value < 1.0f)
+    {
+        value *= 10.0f;
+        exponent--;
+    }
+
+    uint32_t mantissa = (uint32_t) ((value * 10000000.0f) + 0.5f);
+    if (mantissa >= 100000000U)
+    {
+        mantissa /= 10U;
+        exponent++;
+    }
+
+    uart9_write_u32(mantissa / 10000000U);
+    uart9_write_string(".");
+    uart9_write_u32_padded(mantissa % 10000000U, 7U);
+    uart9_write_string((exponent < 0) ? "e-" : "e+");
+    if (exponent < 0)
+    {
+        exponent = -exponent;
+    }
+    if (exponent < 100)
+    {
+        uart9_write_u32_padded((uint32_t) exponent, 2U);
+    }
+    else
+    {
+        uart9_write_i32(exponent);
+    }
 }
 
 static void uart9_write_hex2(uint8_t value)

@@ -222,7 +222,85 @@ The script sends `off`, then `raw src/sink/vp/vn`, then `adc` for every
 selected route. It writes `<prefix>_metrics.csv`, `<prefix>_samples.csv`, and
 plots when `matplotlib` is available.
 
-Use the existing host reconstruction script with the RA8D1 serial port:
+## MCU-side Reconstruction
+
+The RA8D1 firmware now contains the fixed 8-electrode JAC reconstruction model.
+Host Python is not needed for the reconstruction math during normal operation:
+the MCU captures the 40 adjacent-drive/adjacent-measurement routes, normalizes
+against the active baseline, multiplies by the generated float32 node matrix,
+and prints CSV-style node values.
+
+The model constants are generated offline by:
+
+```bash
+MPLCONFIGDIR=/tmp/mpl .venv/bin/python3 host/generate_eit_recon_model.py
+```
+
+The generated files are `src/eit_recon_model.h` and
+`src/eit_recon_model.c`. They include the 40 route signatures, initial
+baseline amplitudes, mesh nodes/elements, and the final node-space matrix
+equivalent to:
+
+```python
+ds_elem = solver.solve(v1, v0, normalize=True)
+ds_node = sim2pts(mesh_obj.node, mesh_obj.element, ds_elem)
+```
+
+Runtime commands:
+
+```text
+recondump
+reconbase 8 5 256 20 200000 180 1
+recon 8 256 20 200000 180 1
+```
+
+`reconbase` averages valid routes from N empty-tank frames into the RAM
+baseline. It does not write data flash; reset returns to the compiled baseline.
+`recon` prints:
+
+```text
+RECON_BEGIN,frame,electrodes,routes,nodes
+RECON_SUMMARY,valid,invalid,retry,ds_min,ds_max,ds_abs_p98,rel_l2
+node,x,y,ds
+0,...
+...
+RECON_DONE
+```
+
+Coordinates are already rotated for display with S1 at the top, S3 right, S5
+bottom, and S7 left. `scanstat` remains available as the debugging baseline and
+uses the same 40-route order as the reconstruction model.
+
+Live plot MCU reconstruction frames directly from serial:
+
+```bash
+MPLCONFIGDIR=/tmp/mpl .venv/bin/python3 host/plot_recon_live.py \
+  --port /dev/ttyACM0 \
+  --baud 115200 \
+  --baseline-frames 5 \
+  --samples 256 \
+  --settle-ms 20 \
+  --rate 200000 \
+  --gain 512 6 \
+  --latest-only
+```
+
+The script sends `p 1 0 0`, `g DRIVE MEAS`, optional `reconbase`, then loops on
+`recon`. It updates `<out-dir>/<prefix>_latest.png` and
+`<out-dir>/<prefix>_latest_nodes.csv` while also showing a matplotlib window
+when a GUI backend is available.
+
+Verify the generated float32 matrix against the current pyEIT/JAC path with a
+captured baseline/features pair:
+
+```bash
+MPLCONFIGDIR=/tmp/mpl .venv/bin/python3 host/verify_eit_recon_model.py \
+  --baseline-csv eit_reconstruct_ra8d1_live/ra8_baseline.csv \
+  --features-csv eit_reconstruct_ra8d1_live/ra8_latest_features.csv
+```
+
+The older host reconstruction script can still be used as a live comparison
+tool with the RA8D1 serial port:
 
 ```bash
 ../pico2_eit_validation/.venv/bin/python -u ../pico_pio_dma_eit/host/reconstruct_eit_live.py \

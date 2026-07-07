@@ -55,6 +55,8 @@ set(PROJECT_SOURCES
     ra_gen/pin_data.c
     ra_gen/vector_data.c
     src/eit_board.c
+    src/eit_recon.c
+    src/eit_recon_model.c
     src/hal_entry.c
     src/hal_warmstart.c
 )
