@@ -20,6 +20,7 @@ bsp_ipc_semaphore_handle_t g_core_start_semaphore =
 #define LED1_PIN                BSP_IO_PORT_01_PIN_06
 #define LED_BLINK_DELAY_MS      (500U)
 #define UART9_TX_TIMEOUT_MS     (100U)
+#define UART9_BAUD              (115200U)
 #define UART9_RX_BUF_SIZE       (256U)
 #define CLI_LINE_LEN            (128U)
 #define ADC_MAX_SAMPLES         (4096U)
@@ -83,6 +84,8 @@ static void command_adc(char * p);
 static void command_scanraw(char * p);
 static void command_scanstat(char * p);
 static void command_recon(char * p);
+static void command_reconfast(char * p);
+static void command_recon_common(char * p, bool fast);
 static void command_reconbase(char * p);
 static void command_recondump(void);
 static void command_raw(char * p, bool all_off_first);
@@ -150,7 +153,6 @@ void hal_entry(void)
     eit_recon_init();
 
     uart9_write_string("\r\nready\r\n");
-    print_help();
     command_prompt();
 
     char line[CLI_LINE_LEN];
@@ -299,6 +301,10 @@ static void process_line(char * p_line)
     {
         command_recon(p);
     }
+    else if (0 == strcmp(command, "reconfast"))
+    {
+        command_reconfast(p);
+    }
     else if (0 == strcmp(command, "reconbase"))
     {
         command_reconbase(p);
@@ -332,6 +338,7 @@ static void print_help(void)
     uart9_write_string("  scanraw [elec] [samples] [settle_ms] [rate_hz] [pp_limit] [retries]\r\n");
     uart9_write_string("  scanstat [elec] [samples] [settle_ms] [rate_hz] [pp_limit] [retries] [progress]\r\n");
     uart9_write_string("  recon 8 256 20 200000 180 1          one MCU-side JAC frame\r\n");
+    uart9_write_string("  reconfast 8 256 20 200000 180 1      compact ds-only MCU-side JAC frame\r\n");
     uart9_write_string("  reconbase 8 N 256 20 200000 180 1    average N valid frames into RAM baseline\r\n");
     uart9_write_string("  recondump                             print reconstruction model metadata\r\n");
     eit_board_print_signals(uart9_write_string);
@@ -694,6 +701,16 @@ static void command_scanstat(char * p)
 
 static void command_recon(char * p)
 {
+    command_recon_common(p, false);
+}
+
+static void command_reconfast(char * p)
+{
+    command_recon_common(p, true);
+}
+
+static void command_recon_common(char * p, bool fast)
+{
     uint32_t electrodes = EIT_RECON_ELECTRODES;
     uint32_t samples = 256U;
     uint32_t settle_ms = 20U;
@@ -743,7 +760,7 @@ static void command_recon(char * p)
     recon_stats_to_vectors(stats, amp_v, valid, &retry_count);
     eit_recon_solve(amp_v, valid, retry_count, ds_node, &summary);
 
-    uart9_write_string("RECON_BEGIN,");
+    uart9_write_string(fast ? "RECONFAST_BEGIN," : "RECON_BEGIN,");
     uart9_write_u32(g_frame_id);
     uart9_write_string(",");
     uart9_write_u32(EIT_RECON_ELECTRODES);
@@ -769,20 +786,34 @@ static void command_recon(char * p)
     uart9_write_float(summary.rel_l2);
     uart9_write_string("\r\n");
 
-    uart9_write_string("node,x,y,ds\r\n");
-    for (uint32_t node = 0U; node < EIT_RECON_NODES; node++)
+    if (fast)
     {
-        uart9_write_u32(node);
-        uart9_write_string(",");
-        uart9_write_float(g_eit_recon_node_xy[node][0]);
-        uart9_write_string(",");
-        uart9_write_float(g_eit_recon_node_xy[node][1]);
-        uart9_write_string(",");
-        uart9_write_float(ds_node[node]);
+        uart9_write_string("RECONFAST_DS");
+        for (uint32_t node = 0U; node < EIT_RECON_NODES; node++)
+        {
+            uart9_write_string(",");
+            uart9_write_float(ds_node[node]);
+        }
         uart9_write_string("\r\n");
-        led_heartbeat();
+        uart9_write_string("RECONFAST_DONE\r\n");
     }
-    uart9_write_string("RECON_DONE\r\n");
+    else
+    {
+        uart9_write_string("node,x,y,ds\r\n");
+        for (uint32_t node = 0U; node < EIT_RECON_NODES; node++)
+        {
+            uart9_write_u32(node);
+            uart9_write_string(",");
+            uart9_write_float(g_eit_recon_node_xy[node][0]);
+            uart9_write_string(",");
+            uart9_write_float(g_eit_recon_node_xy[node][1]);
+            uart9_write_string(",");
+            uart9_write_float(ds_node[node]);
+            uart9_write_string("\r\n");
+            led_heartbeat();
+        }
+        uart9_write_string("RECON_DONE\r\n");
+    }
 }
 
 static void command_reconbase(char * p)
@@ -873,15 +904,21 @@ static void command_reconbase(char * p)
         uart9_write_string("\r\n");
     }
 
-    if (!eit_recon_baseline_accum_commit())
+    uint32_t updated_routes = eit_recon_baseline_accum_valid_routes();
+    bool complete = eit_recon_baseline_accum_commit();
+    if (0U == updated_routes)
     {
-        uart9_write_string("ERR: reconbase missing valid route; keep previous baseline\r\n");
+        uart9_write_string("ERR: reconbase no valid routes; keep previous baseline\r\n");
         return;
     }
 
     uart9_write_string("RECONBASE_DONE,");
     uart9_write_u32(frames);
-    uart9_write_string(",ram\r\n");
+    uart9_write_string(complete ? ",ram," : ",ram_partial,");
+    uart9_write_u32(updated_routes);
+    uart9_write_string(",");
+    uart9_write_u32(EIT_RECON_ROUTES - updated_routes);
+    uart9_write_string("\r\n");
 }
 
 static void command_recondump(void)
@@ -1168,7 +1205,8 @@ static bool route_is_valid(scan_stat_t const * p_stat)
 
 static bool route_is_recon_valid(scan_stat_t const * p_stat)
 {
-    return (p_stat->flags == 0U) && (p_stat->raw_flags == 0U) && (p_stat->overrange_count == 0U);
+    uint32_t hard_flags = SCAN_FLAG_OVERRANGE | SCAN_FLAG_LOW_VALID;
+    return ((p_stat->flags & hard_flags) == 0U) && (p_stat->overrange_count == 0U);
 }
 
 static float scan_stat_amp_v(scan_stat_t const * p_stat)
@@ -1436,22 +1474,13 @@ static void uart9_write_string(char const * p_text)
         return;
     }
 
-    wait_ms = UART9_TX_TIMEOUT_MS;
-    while (!g_uart9_tx_complete && !g_uart9_error && (wait_ms > 0U))
-    {
-        R_BSP_SoftwareDelay(1U, BSP_DELAY_UNITS_MILLISECONDS);
-        wait_ms--;
-    }
-
-    if (g_uart9_error || (0U == wait_ms))
-    {
-        (void) g_uart9.p_api->communicationAbort(g_uart9.p_ctrl, UART_DIR_TX);
-    }
+    uint32_t tx_time_ms = (((length * 10U) * 1000U) + (UART9_BAUD - 1U)) / UART9_BAUD;
+    R_BSP_SoftwareDelay(tx_time_ms + 2U, BSP_DELAY_UNITS_MILLISECONDS);
 }
 
 void uart9_callback(uart_callback_args_t * p_args)
 {
-    if (UART_EVENT_TX_COMPLETE == p_args->event)
+    if ((UART_EVENT_TX_COMPLETE == p_args->event) || (UART_EVENT_TX_DATA_EMPTY == p_args->event))
     {
         g_uart9_tx_complete = true;
     }

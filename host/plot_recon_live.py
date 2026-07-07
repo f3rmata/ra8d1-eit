@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -44,7 +45,10 @@ class ReconFrame:
 @dataclass
 class PlotView:
     fig: plt.Figure | None = None
+    ax: plt.Axes | None = None
     triangulation: mtri.Triangulation | None = None
+    image: object | None = None
+    colorbar: object | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,8 +62,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pp-limit", type=int, default=180)
     parser.add_argument("--retries", type=int, default=1)
     parser.add_argument("--baseline-frames", type=int, default=0, help="send reconbase before live plotting; 0 skips")
+    parser.add_argument("--baseline-samples", type=int, default=256)
+    parser.add_argument("--baseline-settle-ms", type=int, default=20)
+    parser.add_argument("--baseline-rate", type=int, default=200000)
+    parser.add_argument("--baseline-pp-limit", type=int, default=180)
+    parser.add_argument("--baseline-retries", type=int, default=1)
+    parser.add_argument("--fast", action="store_true", help="use reconfast after one full recon frame has supplied node coordinates")
     parser.add_argument("--gain", nargs=2, type=int, metavar=("DRIVE", "MEAS"), default=(512, 6))
     parser.add_argument("--no-power-init", action="store_true", help="do not send 'p 1 0 0' at startup")
+    parser.add_argument("--reset", action="store_true", help="reset the MCU with pyOCD before opening serial")
+    parser.add_argument("--pyocd", default="/home/fermata/.local/share/pipx/venvs/pyocd/bin/pyocd")
+    parser.add_argument("--target", default="r7fa8d1bh")
+    parser.add_argument("--uid", default="0F7A117605A6")
     parser.add_argument("--frames", type=int, default=0, help="stop after this many frames; 0 runs until interrupted")
     parser.add_argument("--interval", type=float, default=0.0, help="sleep between frames")
     parser.add_argument("--timeout", type=float, default=45.0)
@@ -70,6 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefix", default="mcu")
     parser.add_argument("--latest-only", action="store_true")
     parser.add_argument("--no-save", action="store_true")
+    parser.add_argument("--save-every", type=int, default=1, help="save PNG/CSV every N frames; 0 disables saving")
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--no-electrode-labels", action="store_true")
     parser.add_argument("--debug", action="store_true")
@@ -83,7 +98,10 @@ def clean_line(line: str) -> str:
         "RECONBASE_FRAME,",
         "RECONBASE_DONE,",
         "RECON_BEGIN,",
+        "RECONFAST_BEGIN,",
         "RECON_SUMMARY,",
+        "RECONFAST_DS,",
+        "RECONFAST_DONE",
         "RECON_DONE",
         "ERR:",
         "bad command",
@@ -100,8 +118,7 @@ def clean_line(line: str) -> str:
 
 
 def send_command_and_drain(ser: "serial.Serial", command: str, args: argparse.Namespace, wait_s: float = 0.4) -> None:
-    ser.write((command.rstrip() + "\r\n").encode())
-    ser.flush()
+    write_command(ser, command)
     deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
         raw = ser.readline()
@@ -112,22 +129,107 @@ def send_command_and_drain(ser: "serial.Serial", command: str, args: argparse.Na
             print("serial:", repr(decoded))
 
 
-def init_board(ser: "serial.Serial", args: argparse.Namespace) -> None:
-    ser.reset_input_buffer()
-    ser.write(b"\r\n")
-    ser.flush()
+def run_simple_command(ser: "serial.Serial", command: str, end_marker: str, args: argparse.Namespace) -> None:
+    drain_idle(ser, idle_s=0.15, max_s=1.0, debug=args.debug)
+    write_command(ser, command)
+    deadline = time.monotonic() + 5.0
+    recent: list[str] = []
+    while time.monotonic() < deadline:
+        raw = ser.readline()
+        if not raw:
+            continue
+        decoded = raw.decode("utf-8", errors="replace").rstrip()
+        line = clean_line(decoded)
+        recent.append(decoded)
+        recent = recent[-10:]
+        if args.debug:
+            print("serial:", repr(decoded))
+        if line.startswith(end_marker) or line == end_marker:
+            return
+        if line.startswith("ERR:") or line.startswith("bad command"):
+            raise RuntimeError(line)
+    raise TimeoutError("Timed out waiting for {} after {!r}. Recent:\n{}".format(
+        end_marker, command, "\n".join(recent)
+    ))
+
+
+def write_command(ser: "serial.Serial", command: str) -> None:
+    for ch in command.rstrip().encode():
+        ser.write(bytes([ch]))
+        ser.flush()
+        time.sleep(0.003)
     time.sleep(0.05)
-    ser.reset_input_buffer()
+    for ch in b"\r\n\r":
+        ser.write(bytes([ch]))
+        ser.flush()
+        time.sleep(0.02)
+
+
+def drain_idle(ser: "serial.Serial", idle_s: float, max_s: float, debug: bool) -> None:
+    deadline = time.monotonic() + max_s
+    idle_deadline = time.monotonic() + idle_s
+    while time.monotonic() < deadline:
+        raw = ser.readline()
+        if not raw:
+            if time.monotonic() >= idle_deadline:
+                return
+            continue
+        idle_deadline = time.monotonic() + idle_s
+        if debug:
+            print("drain:", repr(raw.decode("utf-8", errors="replace").rstrip()))
+
+
+def wait_for_prompt(ser: "serial.Serial", timeout: float, debug: bool) -> None:
+    deadline = time.monotonic() + timeout
+    data = b""
+    saw_ready = False
+    first_prompt_time: float | None = None
+    while time.monotonic() < deadline:
+        chunk = ser.read(256)
+        if chunk:
+            data += chunk
+            data = data[-1024:]
+            if debug:
+                print("prompt-drain:", repr(chunk.decode("utf-8", errors="replace")))
+            if b"ready" in data:
+                saw_ready = True
+            if b"eit>" in data and saw_ready:
+                return
+            if b"eit>" in data and first_prompt_time is None:
+                first_prompt_time = time.monotonic()
+            if first_prompt_time is not None and (time.monotonic() - first_prompt_time) > 3.0:
+                return
+            continue
+        if first_prompt_time is not None and (time.monotonic() - first_prompt_time) > 3.0:
+            return
+        time.sleep(0.02)
+    raise TimeoutError("Timed out waiting for eit> prompt; last bytes:\n{}".format(
+        data.decode("utf-8", errors="replace")
+    ))
+
+
+def init_board(ser: "serial.Serial", args: argparse.Namespace) -> None:
+    time.sleep(1.0)
+    drain_idle(ser, idle_s=0.3, max_s=3.0, debug=args.debug)
 
     if not args.no_power_init:
-        send_command_and_drain(ser, "p 1 0 0", args)
+        run_simple_command(ser, "p 1 0 0", "power ok", args)
     if args.gain is not None:
-        send_command_and_drain(ser, "g {} {}".format(args.gain[0], args.gain[1]), args)
-    send_command_and_drain(ser, "recondump", args)
+        run_simple_command(ser, "g {} {}".format(args.gain[0], args.gain[1]), "gain drive=", args)
+    run_simple_command(ser, "recondump", "RECONDUMP,", args)
 
 
-def recon_command(args: argparse.Namespace) -> str:
-    return "recon {} {} {} {} {} {}".format(
+def pyocd_reset(args: argparse.Namespace) -> None:
+    cmd = [args.pyocd, "reset", "--target", args.target, "--uid", args.uid]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10.0)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print("warning: pyOCD reset failed ({}); continuing with serial sync".format(exc), flush=True)
+
+
+def recon_command(args: argparse.Namespace, fast: bool = False) -> str:
+    return "{} {} {} {} {} {} {}".format(
+        "reconfast" if fast else "recon",
         args.electrodes,
         args.samples,
         args.settle_ms,
@@ -141,11 +243,11 @@ def reconbase_command(args: argparse.Namespace) -> str:
     return "reconbase {} {} {} {} {} {} {}".format(
         args.electrodes,
         args.baseline_frames,
-        args.samples,
-        args.settle_ms,
-        args.rate,
-        args.pp_limit,
-        args.retries,
+        args.baseline_samples,
+        args.baseline_settle_ms,
+        args.baseline_rate,
+        args.baseline_pp_limit,
+        args.baseline_retries,
     )
 
 
@@ -154,16 +256,19 @@ def capture_baseline(ser: "serial.Serial", args: argparse.Namespace) -> None:
         return
 
     command = reconbase_command(args)
-    print("baseline:", command)
-    ser.reset_input_buffer()
-    ser.write((command + "\r\n").encode())
-    ser.flush()
+    print("baseline:", command, flush=True)
+    drain_idle(ser, idle_s=0.15, max_s=1.0, debug=args.debug)
+    write_command(ser, command)
 
     recent: list[str] = []
     deadline = time.monotonic() + max(args.timeout, args.baseline_frames * args.timeout)
+    started = False
+    start_deadline = time.monotonic() + 8.0
     while time.monotonic() < deadline:
         raw = ser.readline()
         if not raw:
+            if (not started) and time.monotonic() >= start_deadline:
+                raise TimeoutError("Timed out waiting for RECONBASE_BEGIN after {!r}".format(command))
             continue
         decoded = raw.decode("utf-8", errors="replace").rstrip()
         line = clean_line(decoded)
@@ -171,12 +276,17 @@ def capture_baseline(ser: "serial.Serial", args: argparse.Namespace) -> None:
         recent = recent[-20:]
         if args.debug:
             print("serial:", repr(decoded))
+        if not started:
+            if line.startswith("RECONBASE_BEGIN,"):
+                started = True
+            else:
+                continue
         if line.startswith("ERR:"):
             raise RuntimeError(line)
         if line.startswith("RECONBASE_FRAME,"):
-            print(line)
+            print(line, flush=True)
         if line.startswith("RECONBASE_DONE,"):
-            print(line)
+            print(line, flush=True)
             return
 
     raise TimeoutError("Timed out waiting for RECONBASE_DONE. Recent serial lines:\n{}".format("\n".join(recent)))
@@ -193,14 +303,17 @@ def capture_recon_frame(ser: "serial.Serial", args: argparse.Namespace) -> Recon
     rows: list[tuple[int, float, float, float]] = []
     reading_nodes = False
 
-    ser.reset_input_buffer()
-    ser.write((command + "\r\n").encode())
-    ser.flush()
+    drain_idle(ser, idle_s=0.15, max_s=1.0, debug=args.debug)
+    write_command(ser, command)
 
     deadline = time.monotonic() + args.timeout
+    started = False
+    start_deadline = time.monotonic() + 8.0
     while time.monotonic() < deadline:
         raw = ser.readline()
         if not raw:
+            if (not started) and time.monotonic() >= start_deadline:
+                raise TimeoutError("Timed out waiting for RECON_BEGIN after {!r}".format(command))
             continue
         deadline = time.monotonic() + args.timeout
         decoded = raw.decode("utf-8", errors="replace").rstrip()
@@ -211,6 +324,11 @@ def capture_recon_frame(ser: "serial.Serial", args: argparse.Namespace) -> Recon
             print("serial:", repr(decoded))
         if not line:
             continue
+        if not started:
+            if line.startswith("RECON_BEGIN,"):
+                started = True
+            else:
+                continue
         if line.startswith("ERR:") or line.startswith("bad command"):
             raise RuntimeError(line)
         if line.startswith("RECON_BEGIN,"):
@@ -252,6 +370,80 @@ def capture_recon_frame(ser: "serial.Serial", args: argparse.Namespace) -> Recon
     raise TimeoutError("Timed out waiting for RECON_DONE. Recent serial lines:\n{}".format("\n".join(recent)))
 
 
+def capture_reconfast_frame(ser: "serial.Serial", args: argparse.Namespace, template_nodes: np.ndarray) -> ReconFrame:
+    command = recon_command(args, fast=True)
+    recent: list[str] = []
+    frame_id: int | None = None
+    electrodes = args.electrodes
+    routes = 0
+    expected_nodes: int | None = None
+    summary: ReconSummary | None = None
+    ds_values: np.ndarray | None = None
+
+    drain_idle(ser, idle_s=0.15, max_s=1.0, debug=args.debug)
+    write_command(ser, command)
+
+    deadline = time.monotonic() + args.timeout
+    started = False
+    start_deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline:
+        raw = ser.readline()
+        if not raw:
+            if (not started) and time.monotonic() >= start_deadline:
+                raise TimeoutError("Timed out waiting for RECONFAST_BEGIN after {!r}".format(command))
+            continue
+        deadline = time.monotonic() + args.timeout
+        decoded = raw.decode("utf-8", errors="replace").rstrip()
+        line = clean_line(decoded)
+        recent.append(decoded)
+        recent = recent[-20:]
+        if args.debug:
+            print("serial:", repr(decoded))
+        if not line:
+            continue
+        if not started:
+            if line.startswith("RECONFAST_BEGIN,"):
+                started = True
+            else:
+                continue
+        if line.startswith("ERR:") or line.startswith("bad command"):
+            raise RuntimeError(line)
+        if line.startswith("RECONFAST_BEGIN,"):
+            parts = line.split(",")
+            frame_id = int(parts[1])
+            electrodes = int(parts[2])
+            routes = int(parts[3])
+            expected_nodes = int(parts[4])
+            continue
+        if line.startswith("RECON_SUMMARY,"):
+            parts = line.split(",")
+            summary = ReconSummary(
+                valid=int(parts[1]),
+                invalid=int(parts[2]),
+                retry=int(parts[3]),
+                ds_min=float(parts[4]),
+                ds_max=float(parts[5]),
+                ds_abs_p98=float(parts[6]),
+                rel_l2=float(parts[7]),
+            )
+            continue
+        if line.startswith("RECONFAST_DS,"):
+            ds_values = np.asarray([float(value) for value in line.split(",")[1:]], dtype=np.float64)
+            continue
+        if line == "RECONFAST_DONE":
+            if frame_id is None or expected_nodes is None or summary is None or ds_values is None:
+                raise RuntimeError("RECONFAST_DONE before complete frame data")
+            if len(ds_values) != expected_nodes:
+                raise RuntimeError("Frame {} has {} ds values, expected {}".format(frame_id, len(ds_values), expected_nodes))
+            if len(template_nodes) != expected_nodes:
+                raise RuntimeError("Template has {} nodes, expected {}".format(len(template_nodes), expected_nodes))
+            nodes = template_nodes.copy()
+            nodes[:, 3] = ds_values
+            return ReconFrame(frame_id, electrodes, routes, nodes, summary)
+
+    raise TimeoutError("Timed out waiting for RECONFAST_DONE. Recent serial lines:\n{}".format("\n".join(recent)))
+
+
 def save_nodes(path: Path, frame: ReconFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as fp:
@@ -262,7 +454,6 @@ def save_nodes(path: Path, frame: ReconFrame) -> None:
 
 
 def draw_frame(path: Path | None, frame: ReconFrame, args: argparse.Namespace, view: PlotView | None) -> None:
-    node_id = frame.nodes[:, 0].astype(int)
     x = frame.nodes[:, 1]
     y = frame.nodes[:, 2]
     ds = frame.nodes[:, 3]
@@ -281,13 +472,18 @@ def draw_frame(path: Path | None, frame: ReconFrame, args: argparse.Namespace, v
     if show:
         if view.fig is None or not plt.fignum_exists(view.fig.number):
             view.fig = plt.figure(figsize=(7.0, 6.4))
+            view.ax = None
             view.triangulation = None
+            view.image = None
+            view.colorbar = None
         fig = view.fig
-        fig.clf()
+        if view.ax is None:
+            view.ax = fig.add_subplot(111)
+        ax = view.ax
     else:
         fig = plt.figure(figsize=(7.0, 6.4))
+        ax = fig.add_subplot(111)
 
-    ax = fig.add_subplot(111)
     if show and view.triangulation is not None and len(view.triangulation.x) == len(x):
         triangulation = view.triangulation
     else:
@@ -295,27 +491,38 @@ def draw_frame(path: Path | None, frame: ReconFrame, args: argparse.Namespace, v
         if show:
             view.triangulation = triangulation
 
-    image = ax.tripcolor(triangulation, ds, shading="gouraud", cmap="coolwarm", vmin=-vmax, vmax=vmax)
-    ax.set_aspect("equal")
-    ax.set_axis_off()
-    ax.set_title(
-        "RA8D1 MCU JAC frame {} | valid={} invalid={} retry={} p98={:.3e}".format(
-            frame.frame_id,
-            frame.summary.valid,
-            frame.summary.invalid,
-            frame.summary.retry,
-            frame.summary.ds_abs_p98,
-        )
+    title = "RA8D1 MCU JAC frame {} | valid={} invalid={} retry={} p98={:.3e}".format(
+        frame.frame_id,
+        frame.summary.valid,
+        frame.summary.invalid,
+        frame.summary.retry,
+        frame.summary.ds_abs_p98,
     )
-    if not args.no_electrode_labels:
-        for index in range(frame.electrodes):
-            angle = (np.pi / 2.0) - (2.0 * np.pi * index / frame.electrodes)
-            ex = np.cos(angle)
-            ey = np.sin(angle)
-            ax.plot([ex], [ey], marker="o", markersize=4, color="black", zorder=4)
-            ax.text(ex * 1.09, ey * 1.09, "S{}".format(index + 1), ha="center", va="center", fontsize=9)
-    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="conductivity change")
-    fig.tight_layout()
+
+    if show and view.image is not None:
+        view.image.set_array(ds)
+        view.image.set_clim(-vmax, vmax)
+        ax.set_title(title)
+    else:
+        ax.clear()
+        image = ax.tripcolor(triangulation, ds, shading="gouraud", cmap="coolwarm", vmin=-vmax, vmax=vmax)
+        ax.set_aspect("equal")
+        ax.set_axis_off()
+        ax.set_title(title)
+        if not args.no_electrode_labels:
+            for index in range(frame.electrodes):
+                angle = (np.pi / 2.0) - (2.0 * np.pi * index / frame.electrodes)
+                ex = np.cos(angle)
+                ey = np.sin(angle)
+                ax.plot([ex], [ey], marker="o", markersize=4, color="black", zorder=4)
+                ax.text(ex * 1.09, ey * 1.09, "S{}".format(index + 1), ha="center", va="center", fontsize=9)
+        if show:
+            view.image = image
+            if view.colorbar is None:
+                view.colorbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="conductivity change")
+        else:
+            fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="conductivity change")
+        fig.tight_layout()
 
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -327,11 +534,11 @@ def draw_frame(path: Path | None, frame: ReconFrame, args: argparse.Namespace, v
     else:
         plt.close(fig)
 
-    _ = node_id
-
 
 def main() -> int:
     args = parse_args()
+    if args.reset:
+        pyocd_reset(args)
     view = None
     if not args.no_plot:
         backend = plt.get_backend().lower()
@@ -351,23 +558,29 @@ def main() -> int:
     if not args.no_save:
         args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    with serial.Serial(args.port, args.baud, timeout=0.2) as ser:
+    with serial.Serial(args.port, args.baud, timeout=1.0) as ser:
         time.sleep(0.3)
         init_board(ser, args)
         capture_baseline(ser, args)
 
         frame_index = 0
+        template_nodes: np.ndarray | None = None
         while True:
-            frame = capture_recon_frame(ser, args)
-            latest_csv = None if args.no_save else args.out_dir / "{}_latest_nodes.csv".format(args.prefix)
-            latest_png = None if args.no_save else args.out_dir / "{}_latest.png".format(args.prefix)
-            if latest_csv is not None:
+            if args.fast and template_nodes is not None:
+                frame = capture_reconfast_frame(ser, args, template_nodes)
+            else:
+                frame = capture_recon_frame(ser, args)
+                template_nodes = frame.nodes.copy()
+            save_enabled = (not args.no_save) and (args.save_every > 0) and ((frame_index % args.save_every) == 0)
+            latest_csv = args.out_dir / "{}_latest_nodes.csv".format(args.prefix) if save_enabled else None
+            latest_png = args.out_dir / "{}_latest.png".format(args.prefix) if save_enabled else None
+            if save_enabled and latest_csv is not None:
                 save_nodes(latest_csv, frame)
-            if not args.latest_only and not args.no_save:
+            if save_enabled and not args.latest_only:
                 save_nodes(args.out_dir / "{}_{:06d}_nodes.csv".format(args.prefix, frame.frame_id), frame)
 
             draw_frame(latest_png, frame, args, view)
-            if not args.latest_only and not args.no_save:
+            if save_enabled and not args.latest_only:
                 draw_frame(args.out_dir / "{}_{:06d}.png".format(args.prefix, frame.frame_id), frame, args, None)
 
             print(

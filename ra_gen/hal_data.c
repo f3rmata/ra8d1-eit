@@ -166,7 +166,7 @@ const sci_b_spi_extended_cfg_t g_sci_spi_h_cfg_extend =
                   SCI_B_SPI_TX_FIFO_TRIGGER_DISABLED, };
 
 const spi_cfg_t g_sci_spi_h_cfg =
-{ .channel = 2, .operating_mode = SPI_MODE_MASTER, .clk_phase = SPI_CLK_PHASE_EDGE_EVEN, .clk_polarity =
+{ .channel = 2, .operating_mode = SPI_MODE_MASTER, .clk_phase = SPI_CLK_PHASE_EDGE_ODD, .clk_polarity =
           SPI_CLK_POLARITY_LOW,
   .mode_fault = SPI_MODE_FAULT_ERROR_DISABLE, .bit_order = SPI_BIT_ORDER_MSB_FIRST,
 #define RA_NOT_DEFINED (1)

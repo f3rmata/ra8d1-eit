@@ -80,22 +80,36 @@ void eit_recon_baseline_accum_add(float const amp_v[EIT_RECON_ROUTES],
     }
 }
 
-bool eit_recon_baseline_accum_commit(void)
+uint32_t eit_recon_baseline_accum_valid_routes(void)
 {
+    uint32_t count = 0U;
     for (uint32_t route = 0U; route < EIT_RECON_ROUTES; route++)
     {
-        if (0U == g_accum_count[route])
+        if (g_accum_count[route] > 0U)
         {
-            return false;
+            count++;
+        }
+    }
+    return count;
+}
+
+bool eit_recon_baseline_accum_commit(void)
+{
+    uint32_t updated = 0U;
+    for (uint32_t route = 0U; route < EIT_RECON_ROUTES; route++)
+    {
+        if (g_accum_count[route] > 0U)
+        {
+            g_active_baseline[route] = g_accum_sum[route] / (float) g_accum_count[route];
+            updated++;
         }
     }
 
-    for (uint32_t route = 0U; route < EIT_RECON_ROUTES; route++)
+    if (updated > 0U)
     {
-        g_active_baseline[route] = g_accum_sum[route] / (float) g_accum_count[route];
+        g_baseline_is_ram = true;
     }
-    g_baseline_is_ram = true;
-    return true;
+    return (updated == EIT_RECON_ROUTES);
 }
 
 void eit_recon_solve(float const amp_v[EIT_RECON_ROUTES],

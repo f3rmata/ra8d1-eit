@@ -25,6 +25,7 @@ bool eit_recon_route_matches(uint32_t route_index, uint32_t src, uint32_t sink, 
 void eit_recon_baseline_accum_clear(void);
 void eit_recon_baseline_accum_add(float const amp_v[EIT_RECON_ROUTES],
                                   bool const valid[EIT_RECON_ROUTES]);
+uint32_t eit_recon_baseline_accum_valid_routes(void);
 bool eit_recon_baseline_accum_commit(void);
 void eit_recon_solve(float const amp_v[EIT_RECON_ROUTES],
                      bool const valid[EIT_RECON_ROUTES],
