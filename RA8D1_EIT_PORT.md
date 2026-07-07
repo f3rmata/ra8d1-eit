@@ -189,6 +189,24 @@ versions into `script/` before running the CMake build.
   mean, `rms_code` is the raw AC RMS around that mean, and `pp_code` is the
   trimmed peak-to-peak diagnostic. The reconstruction host uses
   `rms_code * sqrt(2)` as the voltage amplitude.
+- `scanstatbin` sends the same route statistics as a binary frame. All integer
+  fields are little-endian. The 32-byte header is:
+  `magic[4]="EITB"`, `version:u8=1`, `type:u8=1`, `header_len:u16=32`,
+  `payload_len:u32`, `frame_id:u32`, `electrodes:u16`, `samples:u16`,
+  `rate_hz:u32`, `route_count:u16`, `row_stride:u16=32`,
+  `payload_crc16_ccitt:u16`, `reserved:u16`.
+  Each 32-byte route row is:
+  `route_index:u16`, `src:u8`, `sink:u8`, `vp:u8`, `vn:u8`,
+  `mean_milli:u32`, `rms_milli:u32`, `min_code:u16`, `max_code:u16`,
+  `pp_code:u16`, `overrange_count:u16`, `valid_count:u16`, `flags:u16`,
+  `raw_flags:u16`, `retry_count:u8`, `reserved[3]`.
+- `reconfastbin` uses binary frame type `2` after MCU-side JAC reconstruction.
+  The 32-byte common header uses `meta0=electrodes`, `meta1=node_count`,
+  `meta2=route_count`, `item_count=node_count`, and `item_stride=4`.
+  The payload starts with a 32-byte summary:
+  `valid:u16`, `invalid:u16`, `retry:u16`, `reserved:u16`,
+  `ds_min:f32`, `ds_max:f32`, `ds_abs_p98:f32`, `rel_l2:f32`,
+  `reserved[8]`, followed by `node_count` little-endian float32 `ds` values.
 
 ## Bring-up Commands
 
@@ -201,6 +219,8 @@ off
 adc 2048 200000
 scanraw 8 256 20 200000 0 0
 scanstat 8 256 20 200000 180 1
+scanstatbin 8 256 20 200000 180 1
+reconfastbin 8 256 20 200000 180 1
 ```
 
 Low-output route-quality diagnosis from the host:

@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 import numpy as np
 
+from eit_binary import read_reconfast_frame
 from serial_lines import SerialLineReader, clean_protocol_line
 
 try:
@@ -70,6 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-pp-limit", type=int, default=180)
     parser.add_argument("--baseline-retries", type=int, default=1)
     parser.add_argument("--fast", action="store_true", help="use reconfast after one full recon frame has supplied node coordinates")
+    parser.add_argument("--binary-fast", action="store_true", help="use reconfastbin binary frames after the first full recon frame")
     parser.add_argument("--gain", nargs=2, type=int, metavar=("DRIVE", "MEAS"), default=(512, 6))
     parser.add_argument("--no-power-init", action="store_true", help="do not send 'p 1 0 0' at startup")
     parser.add_argument("--reset", action="store_true", help="reset the MCU with pyOCD before opening serial")
@@ -436,6 +438,38 @@ def capture_reconfast_frame(ser: "serial.Serial", args: argparse.Namespace, temp
     raise TimeoutError("Timed out waiting for RECONFAST_DONE. Recent serial lines:\n{}".format(reader.format_recent()))
 
 
+def capture_reconfastbin_frame(ser: "serial.Serial", args: argparse.Namespace, template_nodes: np.ndarray) -> ReconFrame:
+    command = "{} {} {} {} {} {} {}".format(
+        "reconfastbin",
+        args.electrodes,
+        args.samples,
+        args.settle_ms,
+        args.rate,
+        args.pp_limit,
+        args.retries,
+    )
+    drain_idle(ser, idle_s=0.15, max_s=1.0, debug=args.debug)
+    write_command(ser, command)
+    frame = read_reconfast_frame(ser, args.timeout)
+    if len(template_nodes) != frame.nodes:
+        raise RuntimeError("Template has {} nodes, expected {}".format(len(template_nodes), frame.nodes))
+    if len(frame.ds_values) != frame.nodes:
+        raise RuntimeError("Frame {} has {} ds values, expected {}".format(frame.frame_id, len(frame.ds_values), frame.nodes))
+
+    nodes = template_nodes.copy()
+    nodes[:, 3] = np.asarray(frame.ds_values, dtype=np.float64)
+    summary = ReconSummary(
+        valid=frame.valid,
+        invalid=frame.invalid,
+        retry=frame.retry,
+        ds_min=frame.ds_min,
+        ds_max=frame.ds_max,
+        ds_abs_p98=frame.ds_abs_p98,
+        rel_l2=frame.rel_l2,
+    )
+    return ReconFrame(frame.frame_id, frame.electrodes, frame.routes, nodes, summary)
+
+
 def save_nodes(path: Path, frame: ReconFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as fp:
@@ -529,6 +563,8 @@ def draw_frame(path: Path | None, frame: ReconFrame, args: argparse.Namespace, v
 
 def main() -> int:
     args = parse_args()
+    if args.binary_fast:
+        args.fast = True
     if args.reset:
         pyocd_reset(args)
     view = None
@@ -559,7 +595,10 @@ def main() -> int:
         template_nodes: np.ndarray | None = None
         while True:
             if args.fast and template_nodes is not None:
-                frame = capture_reconfast_frame(ser, args, template_nodes)
+                if args.binary_fast:
+                    frame = capture_reconfastbin_frame(ser, args, template_nodes)
+                else:
+                    frame = capture_reconfast_frame(ser, args, template_nodes)
             else:
                 frame = capture_recon_frame(ser, args)
                 template_nodes = frame.nodes.copy()

@@ -15,6 +15,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from eit_binary import read_scanstat_frame, scanstat_rows_as_dicts
 from serial_lines import SerialLineReader, clean_protocol_line, write_command
 
 try:
@@ -68,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-warmup", type=int, default=0, help="discard this many frames before baseline capture")
     parser.add_argument("--baseline-frames", type=int, default=1, help="number of valid frames to median into the baseline")
     parser.add_argument("--stats-only", action="store_true", help="use Pico scanstat output instead of streaming raw samples")
+    parser.add_argument("--binary-stat", action="store_true", help="use RA8D1 scanstatbin binary frames")
     parser.add_argument("--raw-pp-limit", type=int, default=180, help="scanraw pp_code threshold for Pico-side retry; 0 disables")
     parser.add_argument("--raw-retries", type=int, default=2, help="scanraw retry count for abnormal raw routes")
     parser.add_argument("--stat-pp-limit", type=int, default=180, help="scanstat pp_code threshold; 0 disables absolute pp filtering")
@@ -334,6 +336,29 @@ def capture_stat_frame(ser: "serial.Serial", args: argparse.Namespace) -> tuple[
     )
 
 
+def capture_statbin_frame(ser: "serial.Serial", args: argparse.Namespace) -> tuple[Frame, list[dict[str, float | int]]]:
+    command = "scanstatbin {} {} {} {} {} {}".format(
+        args.electrodes,
+        args.samples,
+        args.settle_ms,
+        args.rate,
+        args.stat_pp_limit,
+        args.stat_retries,
+    )
+    ser.reset_input_buffer()
+    write_command(ser, command)
+    binary_frame = read_scanstat_frame(ser, args.timeout)
+    rows = scanstat_rows_as_dicts(binary_frame, args.vref)
+    frame = Frame(
+        binary_frame.frame_id,
+        binary_frame.electrodes,
+        binary_frame.samples,
+        float(binary_frame.rate_hz),
+        [],
+    )
+    return frame, rows
+
+
 def sine_feature(samples: np.ndarray, sample_rate_hz: float, excitation_hz: float) -> tuple[float, float, float]:
     t = np.arange(samples.size, dtype=np.float64) / sample_rate_hz
     omega = 2.0 * math.pi * excitation_hz
@@ -579,7 +604,9 @@ def main() -> int:
         init_board(ser, args)
         try:
             while True:
-                if args.stats_only:
+                if args.binary_stat:
+                    frame, rows = capture_statbin_frame(ser, args)
+                elif args.stats_only:
                     frame, rows = capture_stat_frame(ser, args)
                 else:
                     frame = capture_frame(ser, args)

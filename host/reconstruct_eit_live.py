@@ -15,6 +15,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from eit_binary import read_scanstat_frame
 from serial_lines import SerialLineReader, clean_protocol_line, write_command
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -150,6 +151,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hold-on-exit", action="store_true", help="keep the plot window open after a finite run")
     parser.add_argument("--no-electrode-labels", action="store_true")
     parser.add_argument("--frame-retries", type=int, default=2, help="retry malformed or incomplete scanstat frames")
+    parser.add_argument("--binary-stat", action="store_true", help="use RA8D1 scanstatbin binary frames")
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
@@ -190,6 +192,9 @@ def expected_route_count(electrodes: int) -> int:
 
 
 def capture_stat_frame_once(ser: "serial.Serial", args: argparse.Namespace) -> StatFrame:
+    if args.binary_stat:
+        return capture_statbin_frame_once(ser, args)
+
     command = "scanstat {} {} {} {} {} {}".format(
         args.electrodes,
         args.samples,
@@ -288,6 +293,51 @@ def capture_stat_frame_once(ser: "serial.Serial", args: argparse.Namespace) -> S
             )
 
     raise TimeoutError("Timed out waiting for STAT_DONE. Recent serial lines:\n{}".format(reader.format_recent()))
+
+
+def capture_statbin_frame_once(ser: "serial.Serial", args: argparse.Namespace) -> StatFrame:
+    command = "scanstatbin {} {} {} {} {} {}".format(
+        args.electrodes,
+        args.samples,
+        args.settle_ms,
+        args.rate,
+        args.stat_pp_limit,
+        args.stat_retries,
+    )
+    ser.reset_input_buffer()
+    write_command(ser, command)
+    frame = read_scanstat_frame(ser, args.timeout)
+    scale = args.vref / 1023.0
+    rows = [
+        StatRow(
+            frame=frame.frame_id,
+            route_index=row.route_index,
+            src=row.src,
+            sink=row.sink,
+            vp=row.vp,
+            vn=row.vn,
+            mean_code=row.mean_milli / 1000.0,
+            pp_code=float(row.pp_code),
+            rms_code=row.rms_milli / 1000.0,
+            amp_v=(row.rms_milli / 1000.0) * scale * math.sqrt(2.0),
+            overrange_count=row.overrange_count,
+            valid_count=row.valid_count,
+            flags=row.flags,
+            retry_count=row.retry_count,
+            raw_flags=row.raw_flags,
+        )
+        for row in frame.rows
+    ]
+    expected_routes = expected_route_count(frame.electrodes)
+    if expected_routes > 0 and len(rows) != expected_routes:
+        raise RuntimeError(
+            "Incomplete STAT binary frame {}: got {} route(s), expected {}".format(
+                frame.frame_id,
+                len(rows),
+                expected_routes,
+            )
+        )
+    return StatFrame(frame_id=frame.frame_id, electrodes=frame.electrodes, rows=rows)
 
 
 def capture_stat_frame(ser: "serial.Serial", args: argparse.Namespace) -> StatFrame:

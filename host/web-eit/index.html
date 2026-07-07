@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RA8D1 EIT Web Console</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>RA8D1 EIT</h1>
+        <p id="statusText" class="status-text">未连接</p>
+      </div>
+      <div class="toolbar">
+        <button id="connectBtn" type="button">连接</button>
+        <button id="disconnectBtn" type="button" disabled>断开</button>
+        <button id="initBtn" type="button" disabled>初始化</button>
+        <button id="baselineBtn" type="button" disabled>基线</button>
+        <button id="startBtn" type="button" disabled>开始</button>
+        <button id="stopBtn" type="button" disabled>停止</button>
+      </div>
+    </header>
+
+    <section class="workspace">
+      <aside class="control-panel" aria-label="采集参数">
+        <section class="panel-section">
+          <h2>采集</h2>
+          <div class="grid-form">
+            <label>电极数<input id="electrodesInput" type="number" min="4" max="32" step="1" value="8"></label>
+            <label>采样点<input id="samplesInput" type="number" min="1" max="4096" step="1" value="256"></label>
+            <label>稳定 ms<input id="settleInput" type="number" min="0" max="1000" step="1" value="20"></label>
+            <label>采样率<input id="rateInput" type="number" min="1000" step="1000" value="200000"></label>
+            <label>PP 限值<input id="ppLimitInput" type="number" min="0" max="1023" step="1" value="180"></label>
+            <label>重试<input id="retriesInput" type="number" min="0" max="3" step="1" value="1"></label>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <h2>前端</h2>
+          <div class="grid-form">
+            <label>驱动增益<input id="driveGainInput" type="number" min="0" max="1023" step="1" value="512"></label>
+            <label>测量增益<input id="measGainInput" type="number" min="0" max="1023" step="1" value="6"></label>
+            <label>基线帧数<input id="baselineFramesInput" type="number" min="1" max="50" step="1" value="5"></label>
+            <label>帧间隔 ms<input id="intervalInput" type="number" min="0" max="10000" step="50" value="0"></label>
+          </div>
+          <label class="check-row"><input id="fastModeInput" type="checkbox" checked> 首帧后使用 reconfast</label>
+        </section>
+
+        <section class="panel-section">
+          <h2>显示</h2>
+          <div class="grid-form">
+            <label>固定量程<input id="vmaxInput" type="number" min="0" step="0.0001" value="0"></label>
+            <label>最小量程<input id="minVmaxInput" type="number" min="0" step="0.0001" value="0.0001"></label>
+            <label>死区<input id="deadbandInput" type="number" min="0" step="0.0001" value="0"></label>
+            <label>网格尺寸<input id="gridInput" type="number" min="80" max="320" step="10" value="180"></label>
+          </div>
+          <label class="check-row"><input id="labelsInput" type="checkbox" checked> 显示电极标签</label>
+        </section>
+
+        <section class="panel-section">
+          <h2>命令</h2>
+          <div class="command-row">
+            <input id="commandInput" type="text" value="ver" autocomplete="off">
+            <button id="sendBtn" type="button" disabled>发送</button>
+          </div>
+          <label class="check-row"><input id="rawLogInput" type="checkbox"> 显示原始帧日志</label>
+        </section>
+      </aside>
+
+      <section class="view-panel">
+        <div class="canvas-wrap">
+          <canvas id="eitCanvas" width="900" height="900"></canvas>
+        </div>
+        <div class="stats-strip">
+          <div><span>Frame</span><strong id="frameStat">-</strong></div>
+          <div><span>Valid</span><strong id="validStat">-</strong></div>
+          <div><span>Invalid</span><strong id="invalidStat">-</strong></div>
+          <div><span>Retry</span><strong id="retryStat">-</strong></div>
+          <div><span>p98</span><strong id="p98Stat">-</strong></div>
+          <div><span>rel_l2</span><strong id="relL2Stat">-</strong></div>
+        </div>
+      </section>
+
+      <aside class="log-panel" aria-label="串口日志">
+        <div class="log-head">
+          <h2>串口</h2>
+          <button id="clearLogBtn" type="button">清空</button>
+        </div>
+        <pre id="serialLog"></pre>
+      </aside>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

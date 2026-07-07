@@ -17,3 +17,4 @@ eit_capture_ra8_empty
 eit_capture_ra8_smoke
 host/__pycache__
 eit_recon_mcu_live
+eit_reconstruct
