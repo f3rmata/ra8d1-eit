@@ -84,6 +84,14 @@ class ReconstructionResult:
     route_guard_indices: list[int]
 
 
+def rotate_plot_points_s1_up(points: np.ndarray) -> np.ndarray:
+    """Rotate pyEIT's default electrode layout so S1 is at the top."""
+    rotated = np.empty_like(points)
+    rotated[:, 0] = points[:, 1]
+    rotated[:, 1] = -points[:, 0]
+    return rotated
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Live pyEIT/JAC reconstruction from Pico PIO scanstat frames")
     parser.add_argument("--port", required=True, help="USB serial port, for example /dev/ttyACM0")
@@ -539,7 +547,7 @@ def draw_reconstruction(
     show: bool,
     view: ReconstructionView | None = None,
 ) -> None:
-    pts = mesh_obj.node
+    pts = rotate_plot_points_s1_up(mesh_obj.node)
     tri = mesh_obj.element
     if display_deadband > 0.0:
         display_node = np.where(np.abs(ds_node) >= display_deadband, ds_node, 0.0)

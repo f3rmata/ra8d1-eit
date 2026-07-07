@@ -47,7 +47,7 @@ Table II maps address 0..31 to S1..S32.
 
 These connections are from `../副板.pdf` and `../副板.tel`.
 
-Functional role mapping confirmed on the RA8D1 wiring:
+Functional role mapping:
 
 | Firmware role | Sub-board CS | ADG731 | Drain net | RA pin |
 | --- | --- | --- | --- | --- |
@@ -184,7 +184,10 @@ versions into `script/` before running the CMake build.
   jump larger than 128 codes is replaced with the neighbor average. Consecutive
   clipping is left unchanged.
 - `scanraw` prints decoded raw samples after this bit reversal. If the reversal is removed, raw values look like full-scale random jumps even at low sample rates.
-- Current `scanstat` is for 10 kHz excitation. It synchronously demodulates each raw route at 10 kHz and writes the fitted amplitude into the existing `mean_code` column for Pico host compatibility. `pp_code` remains diagnostic only; large peak-to-peak is expected for a real AC waveform.
+- `scanstat` keeps Pico-compatible field semantics: `mean_code` is the ADC DC
+  mean, `rms_code` is the raw AC RMS around that mean, and `pp_code` is the
+  trimmed peak-to-peak diagnostic. The reconstruction host uses
+  `rms_code * sqrt(2)` as the voltage amplitude.
 
 ## Bring-up Commands
 
@@ -198,6 +201,26 @@ adc 2048 200000
 scanraw 8 256 20 200000 0 0
 scanstat 8 256 20 200000 180 1
 ```
+
+Manual ADC route scan from the host, without using firmware `scanraw`:
+
+```bash
+python host/manual_adc_scan.py \
+  --port /dev/ttyACM0 \
+  --baud 115200 \
+  --electrodes 8 \
+  --samples 512 \
+  --rate 200000 \
+  --settle-ms 20 \
+  --gain 512 6 \
+  --max-routes 8 \
+  --out-dir diagnostics/manual_adc_scan_g512_6 \
+  --prefix quick8
+```
+
+The script sends `off`, then `raw src/sink/vp/vn`, then `adc` for every
+selected route. It writes `<prefix>_metrics.csv`, `<prefix>_samples.csv`, and
+plots when `matplotlib` is available.
 
 Use the existing host reconstruction script with the RA8D1 serial port:
 

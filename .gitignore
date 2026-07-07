@@ -7,3 +7,12 @@ Debug
 .venv
 eit_reconstruct_live
 empty_tank_ra8d1
+diagnostics
+eit_reconstruct_ra8d1_live
+eit_reconstruct_ra8d1_live_check
+eit_reconstruct_ra8d1_picostat
+eit_reconstruct_ra8d1_picostat_blank
+eit_reconstruct_ra8d1_picostat_blank2
+eit_capture_ra8_empty
+eit_capture_ra8_smoke
+host/__pycache__

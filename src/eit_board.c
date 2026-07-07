@@ -104,7 +104,7 @@ static eit_mux_desc_t const g_muxes[] =
      * CS1 -> U7/D1, CS2 -> U5/D2, CS3 -> U8/D3, CS4 -> U6/D4.
      * All four ADG731 parts share the same S1..S32 electrode nets, so only
      * the role CS changes here; the channel-to-electrode mapping stays direct.
-     * Functional roles confirmed on the RA8D1 wiring:
+     * Functional roles confirmed by signal amplitude:
      * D1=SINK, D2=VP, D3=SRC, D4=VN.
      */
     { "src",  BSP_IO_PORT_05_PIN_08 },
@@ -268,6 +268,8 @@ void eit_ad5270_unlock(eit_rheo_t rheo)
 
 void eit_ad5270_set(eit_rheo_t rheo, uint16_t value)
 {
+    eit_ad5270_write(rheo, EIT_CMD_WR_CTRL, 0x002U);
+    eit_ad5270_write(rheo, EIT_CMD_SHTDN, 0x000U);
     eit_ad5270_write(rheo, EIT_CMD_WR_RDAC, value & 0x03FFU);
 }
 

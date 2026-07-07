@@ -15,7 +15,7 @@ bsp_ipc_semaphore_handle_t g_core_start_semaphore =
 };
 #endif
 
-#define FW_VERSION              "ra8d1-eit-p0-dma-ac10k-subcs-cpha-filter-v1"
+#define FW_VERSION              "ra8d1-eit-p0-dma-ac10k-picostat-ad5270wake-v1"
 #define LED1_PIN                BSP_IO_PORT_01_PIN_06
 #define LED_BLINK_DELAY_MS      (500U)
 #define UART9_TX_TIMEOUT_MS     (100U)
@@ -707,7 +707,8 @@ static void compute_scan_stat(uint16_t const * p_samples,
                               scan_stat_t * p_stat)
 {
     uint16_t * hist = g_scan_hist;
-    uint64_t sum = 0U;
+    double sum = 0.0;
+    double sum_sq = 0.0;
     uint32_t overrange_count = 0U;
     uint32_t valid_count = 0U;
 
@@ -725,7 +726,8 @@ static void compute_scan_stat(uint16_t const * p_samples,
             continue;
         }
         valid_count++;
-        sum += value;
+        sum += (double) value;
+        sum_sq += (double) value * (double) value;
     }
 
     uint32_t trim = valid_count / 100U;
@@ -763,64 +765,17 @@ static void compute_scan_stat(uint16_t const * p_samples,
         }
     }
 
-    double dc = valid_count ? ((double) sum / (double) valid_count) : 0.0;
-    double amp = 0.0;
-    double residual_rms = 0.0;
-    if (valid_count > 0U)
+    double mean = valid_count ? (sum / (double) valid_count) : 0.0;
+    double variance = valid_count ? ((sum_sq / (double) valid_count) - (mean * mean)) : 0.0;
+    if (variance < 0.0)
     {
-        double omega = (2.0 * SCAN_PI * (double) SCAN_EXCITE_HZ) / (double) rate;
-        double cc = 0.0;
-        double ss = 0.0;
-        double cs = 0.0;
-        double yc = 0.0;
-        double ys = 0.0;
-
-        for (uint32_t i = 0U; i < samples; i++)
-        {
-            uint16_t value = p_samples[i];
-            if ((value <= 2U) || (value >= 1021U))
-            {
-                continue;
-            }
-            double phase = omega * (double) i;
-            double c = cos(phase);
-            double s = sin(phase);
-            double y = (double) value - dc;
-            cc += c * c;
-            ss += s * s;
-            cs += c * s;
-            yc += y * c;
-            ys += y * s;
-        }
-
-        double a = 0.0;
-        double b = 0.0;
-        double det = (cc * ss) - (cs * cs);
-        if ((det > 1.0e-9) || (det < -1.0e-9))
-        {
-            a = ((yc * ss) - (ys * cs)) / det;
-            b = ((ys * cc) - (yc * cs)) / det;
-            amp = sqrt((a * a) + (b * b));
-        }
-
-        double residual_sum_sq = 0.0;
-        for (uint32_t i = 0U; i < samples; i++)
-        {
-            uint16_t value = p_samples[i];
-            if ((value <= 2U) || (value >= 1021U))
-            {
-                continue;
-            }
-            double phase = omega * (double) i;
-            double fitted = dc + (a * cos(phase)) + (b * sin(phase));
-            double residual = (double) value - fitted;
-            residual_sum_sq += residual * residual;
-        }
-        residual_rms = sqrt(residual_sum_sq / (double) valid_count);
+        variance = 0.0;
     }
+    double rms = sqrt(variance);
 
-    p_stat->mean_milli = (uint32_t) ((amp * 1000.0) + 0.5);
-    p_stat->rms_milli = (uint32_t) ((residual_rms * 1000.0) + 0.5);
+    (void) rate;
+    p_stat->mean_milli = (uint32_t) ((mean * 1000.0) + 0.5);
+    p_stat->rms_milli = (uint32_t) ((rms * 1000.0) + 0.5);
     p_stat->min_code = min_code;
     p_stat->max_code = max_code;
     p_stat->pp_code = (max_code >= min_code) ? (uint32_t) (max_code - min_code) : 0U;

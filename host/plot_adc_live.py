@@ -166,8 +166,6 @@ def main() -> int:
 
     with serial.Serial(args.port, args.baud, timeout=0.2) as ser:
         time.sleep(0.2)
-        if not args.no_power_init:
-            send_power_init(ser, args)
         frame = 0
         try:
             while True:
