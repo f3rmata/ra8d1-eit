@@ -1,0 +1,8 @@
+{
+  "cmake.configureOnOpen": true,
+  "cmake.useCMakePresets": "always",
+  "cmake.buildDirectory": "${workspaceFolder}/build/debug",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/debug/compile_commands.json",
+  "ra8d1.probeRsPath": "/home/fermata/.cargo/bin/probe-rs",
+  "ra8d1.probeRsProbe": "0416:7687"
+}

@@ -1,0 +1,116 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cmake: configure debug",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--preset",
+        "debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "cmake: build debug",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "--preset",
+        "debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$gcc",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "dependsOn": [
+        "cmake: configure debug"
+      ]
+    },
+    {
+      "label": "probe-rs: flash",
+      "type": "shell",
+      "command": "${config:ra8d1.probeRsPath}",
+      "args": [
+        "download",
+        "--chip",
+        "R7FA8D1BH",
+        "--probe",
+        "${config:ra8d1.probeRsProbe}",
+        "--protocol",
+        "swd",
+        "--verify",
+        "--binary-format",
+        "ihex",
+        "${workspaceFolder}/build/debug/ra8d1_eit.flash.hex"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "dependsOn": [
+        "cmake: build debug"
+      ]
+    },
+    {
+      "label": "probe-rs: gdb-server",
+      "type": "shell",
+      "command": "${config:ra8d1.probeRsPath}",
+      "args": [
+        "gdb",
+        "--chip",
+        "R7FA8D1BH",
+        "--probe",
+        "${config:ra8d1.probeRsProbe}",
+        "--protocol",
+        "swd",
+        "--reset-halt",
+        "--gdb-connection-string",
+        "127.0.0.1:1337"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": ".",
+          "file": 1,
+          "location": 2,
+          "message": 3
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".",
+          "endsPattern": ".*(GDB|gdb|Listening|listening|1337).*"
+        }
+      }
+    },
+    {
+      "label": "probe-rs: reset",
+      "type": "shell",
+      "command": "${config:ra8d1.probeRsPath}",
+      "args": [
+        "reset",
+        "--chip",
+        "R7FA8D1BH",
+        "--probe",
+        "${config:ra8d1.probeRsProbe}",
+        "--protocol",
+        "swd"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
