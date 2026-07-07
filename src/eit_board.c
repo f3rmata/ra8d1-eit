@@ -34,7 +34,7 @@ typedef struct st_eit_mux_desc
 } eit_mux_desc_t;
 
 static void pin_write(bsp_io_port_pin_t pin, bsp_io_level_t level);
-static void spi_write(eit_serial_bus_t const * p_bus, bsp_io_port_pin_t cs, uint8_t bits, uint32_t value);
+static bool spi_write(eit_serial_bus_t const * p_bus, bsp_io_port_pin_t cs, uint8_t bits, uint32_t value);
 static void print_pin(eit_text_writer_t writer, eit_pin_desc_t const * p_pin);
 static bool hw_spi_write(uint8_t const * p_data, uint32_t length);
 static uint16_t adc_reverse10(uint16_t value);
@@ -100,7 +100,7 @@ static eit_mux_desc_t const g_muxes[] =
      * CS1 -> U7/D1, CS2 -> U5/D2, CS3 -> U8/D3, CS4 -> U6/D4.
      * All four ADG731 parts share the same S1..S32 electrode nets, so only
      * the role CS changes here; the channel-to-electrode mapping stays direct.
-     * Functional drain roles on the sub-board:
+     * Functional roles confirmed on the RA8D1 wiring:
      * D1=SINK, D2=VP, D3=SRC, D4=VN.
      */
     { "src",  BSP_IO_PORT_05_PIN_08 },
@@ -288,11 +288,11 @@ uint8_t eit_electrode_to_mux(uint8_t electrode)
     return electrode & 0x1FU;
 }
 
-void eit_mux_write(eit_mux_t mux, uint8_t channel, bool enable)
+bool eit_mux_write(eit_mux_t mux, uint8_t channel, bool enable)
 {
     if ((uint32_t) mux >= (sizeof(g_muxes) / sizeof(g_muxes[0])))
     {
-        return;
+        return false;
     }
 
     for (uint32_t i = 0U; i < (sizeof(g_muxes) / sizeof(g_muxes[0])); i++)
@@ -301,25 +301,43 @@ void eit_mux_write(eit_mux_t mux, uint8_t channel, bool enable)
     }
     R_BSP_SoftwareDelay(EIT_MUX_GAP_US, BSP_DELAY_UNITS_MICROSECONDS);
 
-    spi_write(&g_h_bus, mux_cs_pin((uint32_t) mux), 8U, eit_mux_command(channel, enable));
+    return spi_write(&g_h_bus, mux_cs_pin((uint32_t) mux), 8U, eit_mux_command(channel, enable));
 }
 
-void eit_mux_all_off(void)
+bool eit_mux_all_off(void)
 {
+    bool ok = true;
     for (uint32_t i = 0U; i < (sizeof(g_muxes) / sizeof(g_muxes[0])); i++)
     {
-        eit_mux_write((eit_mux_t) i, 0U, false);
+        if (!eit_mux_write((eit_mux_t) i, 0U, false))
+        {
+            ok = false;
+        }
     }
+    return ok;
 }
 
-void eit_route(uint8_t src, uint8_t sink, uint8_t vp, uint8_t vn)
+bool eit_route(uint8_t src, uint8_t sink, uint8_t vp, uint8_t vn)
 {
-    eit_mux_all_off();
+    bool ok = eit_mux_all_off();
     R_BSP_SoftwareDelay(EIT_MUX_GAP_US, BSP_DELAY_UNITS_MICROSECONDS);
-    eit_mux_write(EIT_MUX_SRC, src, true);
-    eit_mux_write(EIT_MUX_SINK, sink, true);
-    eit_mux_write(EIT_MUX_VP, vp, true);
-    eit_mux_write(EIT_MUX_VN, vn, true);
+    if (!eit_mux_write(EIT_MUX_SRC, src, true))
+    {
+        ok = false;
+    }
+    if (!eit_mux_write(EIT_MUX_SINK, sink, true))
+    {
+        ok = false;
+    }
+    if (!eit_mux_write(EIT_MUX_VP, vp, true))
+    {
+        ok = false;
+    }
+    if (!eit_mux_write(EIT_MUX_VN, vn, true))
+    {
+        ok = false;
+    }
+    return ok;
 }
 
 uint16_t eit_adc_read(void)
@@ -462,10 +480,11 @@ static void pin_write(bsp_io_port_pin_t pin, bsp_io_level_t level)
     (void) R_IOPORT_PinWrite(&g_ioport_ctrl, pin, level);
 }
 
-static void spi_write(eit_serial_bus_t const * p_bus, bsp_io_port_pin_t cs, uint8_t bits, uint32_t value)
+static bool spi_write(eit_serial_bus_t const * p_bus, bsp_io_port_pin_t cs, uint8_t bits, uint32_t value)
 {
     uint8_t buf[2];
     uint32_t length;
+    bool ok = true;
     if (bits <= 8U)
     {
         buf[0] = (uint8_t) value;
@@ -483,7 +502,7 @@ static void spi_write(eit_serial_bus_t const * p_bus, bsp_io_port_pin_t cs, uint
     R_BSP_SoftwareDelay(EIT_SPI_SETUP_US, BSP_DELAY_UNITS_MICROSECONDS);
     if (p_bus->use_hw_spi)
     {
-        (void) hw_spi_write(buf, length);
+        ok = hw_spi_write(buf, length);
     }
     else
     {
@@ -502,6 +521,7 @@ static void spi_write(eit_serial_bus_t const * p_bus, bsp_io_port_pin_t cs, uint
     R_BSP_SoftwareDelay(EIT_SPI_HOLD_US, BSP_DELAY_UNITS_MICROSECONDS);
     pin_write(cs, BSP_IO_LEVEL_HIGH);
     R_BSP_SoftwareDelay(EIT_SPI_GAP_US, BSP_DELAY_UNITS_MICROSECONDS);
+    return ok;
 }
 
 static bool hw_spi_write(uint8_t const * p_data, uint32_t length)

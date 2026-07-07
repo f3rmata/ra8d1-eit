@@ -15,7 +15,7 @@ bsp_ipc_semaphore_handle_t g_core_start_semaphore =
 };
 #endif
 
-#define FW_VERSION              "ra8d1-eit-p0-dma-ac10k-dmap-v1"
+#define FW_VERSION              "ra8d1-eit-p0-dma-ac10k-subcs-cpha-v1"
 #define LED1_PIN                BSP_IO_PORT_01_PIN_06
 #define LED_BLINK_DELAY_MS      (500U)
 #define UART9_TX_TIMEOUT_MS     (100U)
@@ -251,8 +251,14 @@ static void process_line(char * p_line)
     }
     else if (0 == strcmp(command, "off"))
     {
-        eit_mux_all_off();
-        uart9_write_string("all mux off cmd=0x80\r\n");
+        if (eit_mux_all_off())
+        {
+            uart9_write_string("all mux off cmd=0x80\r\n");
+        }
+        else
+        {
+            uart9_write_string("ERR: mux off spi_error cmd=0x80\r\n");
+        }
     }
     else if (0 == strcmp(command, "adc"))
     {
@@ -316,21 +322,35 @@ static void command_raw(char * p, bool all_off_first)
         return;
     }
 
+    bool ok = true;
     if (all_off_first)
     {
-        eit_mux_all_off();
+        ok = eit_mux_all_off();
         R_BSP_SoftwareDelay(10U, BSP_DELAY_UNITS_MICROSECONDS);
     }
     if (0U != enable)
     {
-        eit_mux_write(mux, (uint8_t) channel, true);
+        if (!eit_mux_write(mux, (uint8_t) channel, true))
+        {
+            ok = false;
+        }
     }
     else
     {
-        eit_mux_write(mux, 0U, false);
+        if (!eit_mux_write(mux, 0U, false))
+        {
+            ok = false;
+        }
     }
 
-    uart9_write_string(all_off_first ? "rawonly ok cmd=0x" : "raw ok cmd=0x");
+    if (!ok)
+    {
+        uart9_write_string(all_off_first ? "rawonly spi_error cmd=0x" : "raw spi_error cmd=0x");
+    }
+    else
+    {
+        uart9_write_string(all_off_first ? "rawonly ok cmd=0x" : "raw ok cmd=0x");
+    }
     uart9_write_hex2(eit_mux_command((uint8_t) channel, 0U != enable));
     uart9_write_string("\r\n");
 }
@@ -358,7 +378,7 @@ static void command_adc(char * p)
     static uint16_t decoded[ADC_MAX_SAMPLES];
     if (!eit_adc_capture(decoded, samples, rate))
     {
-        uart9_write_string("ERR: adc capture unavailable\r\n");
+        uart9_write_string("ERR: route or adc capture unavailable\r\n");
         return;
     }
 
@@ -444,7 +464,7 @@ static void command_scanraw(char * p)
             if (!capture_scan_stat(decoded, samples, rate, settle_ms, pp_limit, retries, &stat))
             {
                 eit_mux_all_off();
-                uart9_write_string("ERR: adc capture unavailable\r\n");
+                uart9_write_string("ERR: route or adc capture unavailable\r\n");
                 return;
             }
             eit_mux_all_off();
@@ -572,7 +592,7 @@ static void command_scanstat(char * p)
             if (!capture_scan_stat(decoded, samples, rate, settle_ms, pp_limit, retries, p_stat))
             {
                 eit_mux_all_off();
-                uart9_write_string("ERR: adc capture unavailable route=");
+                uart9_write_string("ERR: route or adc capture unavailable route=");
                 uart9_write_u32(p_stat->route_index);
                 uart9_write_string("\r\n");
                 return;
@@ -642,7 +662,10 @@ static bool capture_scan_stat(uint16_t * p_samples,
                               uint32_t retries,
                               scan_stat_t * p_stat)
 {
-    eit_route((uint8_t) p_stat->src, (uint8_t) p_stat->sink, (uint8_t) p_stat->vp, (uint8_t) p_stat->vn);
+    if (!eit_route((uint8_t) p_stat->src, (uint8_t) p_stat->sink, (uint8_t) p_stat->vp, (uint8_t) p_stat->vn))
+    {
+        return false;
+    }
     R_BSP_SoftwareDelay(settle_ms, BSP_DELAY_UNITS_MILLISECONDS);
 
     if (!eit_adc_capture(p_samples, samples, rate))
@@ -661,7 +684,10 @@ static bool capture_scan_stat(uint16_t * p_samples,
 
     while ((p_stat->flags != 0U) && (p_stat->retry_count < retries))
     {
-        eit_route((uint8_t) p_stat->src, (uint8_t) p_stat->sink, (uint8_t) p_stat->vp, (uint8_t) p_stat->vn);
+        if (!eit_route((uint8_t) p_stat->src, (uint8_t) p_stat->sink, (uint8_t) p_stat->vp, (uint8_t) p_stat->vn))
+        {
+            return false;
+        }
         R_BSP_SoftwareDelay(retry_settle_ms, BSP_DELAY_UNITS_MILLISECONDS);
         if (!eit_adc_capture(p_samples, samples, rate))
         {

@@ -48,9 +48,9 @@ void eit_ad5270_shutdown(eit_rheo_t rheo, bool shutdown);
 
 uint8_t eit_mux_command(uint8_t channel, bool enable);
 uint8_t eit_electrode_to_mux(uint8_t electrode);
-void eit_mux_write(eit_mux_t mux, uint8_t channel, bool enable);
-void eit_mux_all_off(void);
-void eit_route(uint8_t src, uint8_t sink, uint8_t vp, uint8_t vn);
+bool eit_mux_write(eit_mux_t mux, uint8_t channel, bool enable);
+bool eit_mux_all_off(void);
+bool eit_route(uint8_t src, uint8_t sink, uint8_t vp, uint8_t vn);
 
 uint16_t eit_adc_read(void);
 bool eit_adc_capture(uint16_t * p_out, uint32_t samples, uint32_t rate_hz);

@@ -47,7 +47,7 @@ Table II maps address 0..31 to S1..S32.
 
 These connections are from `../副板.pdf` and `../副板.tel`.
 
-Functional role mapping confirmed on the sub-board:
+Functional role mapping confirmed on the RA8D1 wiring:
 
 | Firmware role | Sub-board CS | ADG731 | Drain net | RA pin |
 | --- | --- | --- | --- | --- |
@@ -56,9 +56,10 @@ Functional role mapping confirmed on the sub-board:
 | `src`  | CS3 | U8 | D3 | P508 |
 | `vn`   | CS4 | U6 | D4 | P509 |
 
-The Pico firmware role names are preserved (`src`, `sink`, `vp`, `vn`), and the
-ADG731 command byte is still Pico-compatible. Do not add an S-channel remap for
-this board; only the role-to-CS table differs.
+The ADG731 command byte is Pico-compatible even though the RA8D1 adapter uses
+the confirmed drain roles above. Do not add an S-channel remap for the
+PIO-compatible `raw`/`scanraw` path; `channel & 0x1f` must reach the ADG731
+unchanged.
 
 All four ADG731 chips share the same electrode source nets. The command channel
 therefore maps directly to the silk/net label regardless of role:
@@ -147,7 +148,7 @@ the serial port and baud rate should need to change on host scripts.
 - Stacks tab:
   - Keep SCI9 UART enabled.
   - Add/keep `SPI on SCI_B_SPI` named `g_sci_spi_h` on channel 2.
-  - Configure `g_sci_spi_h`: master, CPOL low, CPHA edge odd, MSB first, 100000 baud, no DTC/DMAC.
+  - Configure `g_sci_spi_h`: master, CPOL low, CPHA edge even, MSB first, 100000 baud, no DTC/DMAC.
   - Add/keep `Timer, General PWM (r_gpt)` named `g_adc_sample_timer` on GPT0.
     Configure periodic mode, 5 us default period, no output pins, no callback, cycle-end interrupt disabled.
   - Add/keep `Transfer on DMAC (r_dmac)` named `g_adc_port_dma` on DMAC channel 0.
@@ -157,6 +158,20 @@ the serial port and baud rate should need to change on host scripts.
 - BSP tab:
   - Set main stack to at least `0x2000`. `scanstat` uses math/FSP callbacks and should not run with the default `0x400` stack.
 - After changing pins, regenerate FSP files, then rebuild with CMake.
+
+## CMake Build Notes
+
+The CMake build does not depend on the e2studio `Debug/` directory. The FSP
+linker support files used by CMake are kept in `script/`:
+
+```text
+script/fsp_gen.ld
+script/memory_regions.ld
+script/bsp_linker_info.h
+```
+
+If e2studio regenerates these files after BSP/memory changes, copy the updated
+versions into `script/` before running the CMake build.
 
 ## ADC Capture Notes
 
@@ -202,7 +217,7 @@ The RA8D1 ADG731 path is intended to match the working Pico timing:
 | SPI peripheral | SPI0 | SCI2 simple SPI, `g_sci_spi_h` |
 | Bitrate | 100 kHz | 100 kHz |
 | CPOL | 0 | low |
-| CPHA | 1 | edge odd |
+| CPHA | 1 | edge even |
 | Bit order | MSB first | MSB first |
 | CS setup | 5 us | 5 us |
 | CS hold | 5 us | 5 us |
@@ -227,7 +242,10 @@ For each `rawonly`, verify:
 - `H_DAT` changes on SCI2 TXD2 / PA03 and `H_SCLK` toggles on SCI2 SCK2 / PA04.
 - CS stays low until after the last clock, then returns high.
 - `cmd=0x..` printed by firmware matches the byte on `H_DAT`.
+- The firmware prints `ok`, not `spi_error`. A `spi_error` means the SCI2 SPI
+  transfer did not complete before CS was released.
 
-If SCK toggles but ADG731 does not switch, try changing `g_sci_spi_h` clock
-phase in e2studio from edge odd to edge even and regenerate. If no SCK toggles,
-the issue is pin muxing or wiring, not ADG731 command content.
+If SCK toggles but ADG731 channel numbers are shifted or scrambled, verify that
+`g_sci_spi_h` uses clock phase edge even. FSP's `edge odd` means sampling on the
+first edge and does not match Pico `SPI_CPHA_1`. If no SCK toggles, the issue is
+pin muxing or wiring, not ADG731 command content.

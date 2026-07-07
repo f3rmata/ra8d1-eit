@@ -65,7 +65,6 @@ target_link_libraries(${TARGET_NAME}.elf PRIVATE m)
 
 target_include_directories(${TARGET_NAME}.elf PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/Debug
     ${CMAKE_CURRENT_BINARY_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/ra_gen
     ${CMAKE_CURRENT_SOURCE_DIR}/ra_cfg/fsp_cfg/bsp
@@ -110,17 +109,17 @@ target_compile_options(${TARGET_NAME}.elf PRIVATE
 )
 
 configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/Debug/fsp_gen.ld
+    ${CMAKE_CURRENT_SOURCE_DIR}/script/fsp_gen.ld
     ${CMAKE_CURRENT_BINARY_DIR}/fsp_gen.ld
     COPYONLY
 )
 configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/Debug/memory_regions.ld
+    ${CMAKE_CURRENT_SOURCE_DIR}/script/memory_regions.ld
     ${CMAKE_CURRENT_BINARY_DIR}/memory_regions.ld
     COPYONLY
 )
 configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/Debug/bsp_linker_info.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/script/bsp_linker_info.h
     ${CMAKE_CURRENT_BINARY_DIR}/bsp_linker_info.h
     COPYONLY
 )
