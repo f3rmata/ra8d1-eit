@@ -12,6 +12,8 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import matplotlib.pyplot as plt
 
+from serial_lines import SerialLineReader, clean_protocol_line, write_command
+
 try:
     import serial
 except ImportError:
@@ -21,7 +23,7 @@ except ImportError:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Continuously capture and plot Pico PIO DMA ADC data")
     parser.add_argument("--port", required=True, help="USB serial port, for example /dev/ttyACM0")
-    parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--baud", type=int, default=460800)
     parser.add_argument("--samples", type=int, default=2048)
     parser.add_argument("--rate", type=int, default=200000, help="PIO ADC readout rate in samples/s")
     parser.add_argument("--csv", type=Path, default=Path("adc_live.csv"))
@@ -37,37 +39,27 @@ def parse_args() -> argparse.Namespace:
 
 
 def clean_line(line: str) -> str:
-    for marker in ("ADC_BEGIN", "ADC_END", "ERR:", "bad command"):
-        index = line.find(marker)
-        if index >= 0:
-            return line[index:]
-    return line.strip()
+    return clean_protocol_line(line, ("ADC_BEGIN", "ADC_END", "ERR:", "bad command"))
 
 
 def capture_adc(ser: "serial.Serial", args: argparse.Namespace) -> tuple[list[int], int]:
-    command = "adc {} {}\r\n".format(args.samples, args.rate).encode()
     values: list[int] = []
     in_block = False
     reported_rate = args.rate
-    recent: list[str] = []
+    reader = SerialLineReader(ser, recent_limit=16)
 
     ser.reset_input_buffer()
-    ser.write(b"\r\n")
-    ser.flush()
+    write_command(ser, "")
     time.sleep(0.02)
     ser.reset_input_buffer()
-    ser.write(command)
-    ser.flush()
+    write_command(ser, "adc {} {}".format(args.samples, args.rate))
 
     deadline = time.monotonic() + args.timeout
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
+    while True:
+        decoded = reader.read_line(deadline)
+        if decoded is None:
+            break
         line = clean_line(decoded)
-        recent.append(decoded)
-        recent = recent[-16:]
         if args.debug:
             print("serial:", repr(decoded))
 
@@ -88,7 +80,9 @@ def capture_adc(ser: "serial.Serial", args: argparse.Namespace) -> tuple[list[in
         if len(parts) == 2:
             values.append(int(parts[1], 0))
 
-    raise TimeoutError("Timed out before ADC_END; captured {} samples\n{}".format(len(values), "\n".join(recent)))
+    raise TimeoutError(
+        "Timed out before ADC_END; captured {} samples\n{}".format(len(values), reader.format_recent())
+    )
 
 
 def save_csv(path: Path, values: list[int]) -> None:
@@ -101,16 +95,15 @@ def save_csv(path: Path, values: list[int]) -> None:
 
 
 def send_power_init(ser: "serial.Serial", args: argparse.Namespace) -> None:
+    reader = SerialLineReader(ser, recent_limit=16)
     ser.reset_input_buffer()
-    ser.write(b"p 1 0 0\r\n")
-    ser.flush()
+    write_command(ser, "p 1 0 0")
 
     deadline = time.monotonic() + 0.5
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
+    while True:
+        decoded = reader.read_line(deadline)
+        if decoded is None:
+            return
         if args.debug:
             print("serial:", repr(decoded))
         if "power ok" in decoded:

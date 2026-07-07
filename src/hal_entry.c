@@ -16,11 +16,12 @@ bsp_ipc_semaphore_handle_t g_core_start_semaphore =
 };
 #endif
 
-#define FW_VERSION              "ra8d1-eit-p0-dma-ac10k-picostat-ad5270wake-v1"
+#define FW_VERSION              "ra8d1-eit-p0-dma-ac10k-picostat-cpha-even-v1"
 #define LED1_PIN                BSP_IO_PORT_01_PIN_06
 #define LED_BLINK_DELAY_MS      (500U)
 #define UART9_TX_TIMEOUT_MS     (100U)
-#define UART9_BAUD              (115200U)
+#define UART9_BAUD              (460800U)
+#define UART9_BAUD_MAX_ERROR_X1000 (5000U)
 #define UART9_RX_BUF_SIZE       (256U)
 #define CLI_LINE_LEN            (128U)
 #define ADC_MAX_SAMPLES         (4096U)
@@ -67,6 +68,7 @@ typedef struct st_scan_stat
 } scan_stat_t;
 
 static void uart9_write_string(char const * p_text);
+static void uart9_configure_baud(void);
 static void uart9_write_u32(uint32_t value);
 static void uart9_write_i32(int32_t value);
 static void uart9_write_u32_padded(uint32_t value, uint32_t width);
@@ -143,6 +145,7 @@ void hal_entry(void)
     {
         error_blink();
     }
+    uart9_configure_baud();
 
     err = eit_board_init();
     if (FSP_SUCCESS != err)
@@ -1476,6 +1479,25 @@ static void uart9_write_string(char const * p_text)
 
     uint32_t tx_time_ms = (((length * 10U) * 1000U) + (UART9_BAUD - 1U)) / UART9_BAUD;
     R_BSP_SoftwareDelay(tx_time_ms + 2U, BSP_DELAY_UNITS_MILLISECONDS);
+}
+
+static void uart9_configure_baud(void)
+{
+    sci_b_baud_setting_t baud_setting;
+    fsp_err_t err = R_SCI_B_UART_BaudCalculate(UART9_BAUD,
+                                               false,
+                                               UART9_BAUD_MAX_ERROR_X1000,
+                                               &baud_setting);
+    if (FSP_SUCCESS != err)
+    {
+        error_blink();
+    }
+
+    err = g_uart9.p_api->baudSet(g_uart9.p_ctrl, &baud_setting);
+    if (FSP_SUCCESS != err)
+    {
+        error_blink();
+    }
 }
 
 void uart9_callback(uart_callback_args_t * p_args)

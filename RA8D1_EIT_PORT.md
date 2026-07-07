@@ -131,9 +131,9 @@ Configure these as SCI2 Simple SPI peripheral pins:
 | H_SCLK | PA04 | RPI-SCK2 | SCI2 SCK2 |
 | H_RX unused | PA02 | RPI optional | SCI2 RXD2, leave unconnected if required |
 
-Keep SCI9 UART on P208/P209 for the CLI. The RA8D1 firmware uses 115200 baud;
-higher tested baud rates caused unreliable reconstruction data on this link, so
-refresh-time reduction is handled by `reconfast` instead of UART overclocking.
+Keep SCI9 UART on P208/P209 for the CLI. The RA8D1 firmware uses 460800 baud
+for the host CLI. Rates above 460800 should be tested explicitly with long
+`scanstat`/`reconfast` captures before using them for reconstruction data.
 
 ## e2studio/FSP Checklist
 
@@ -147,7 +147,7 @@ refresh-time reduction is handled by `reconfast` instead of UART overclocking.
   - Do not configure PA05 as SCI2 CTS/RTS; PA05 is manual ADG731 CS1/SINK.
   - Keep P208 RXD9 and P209 TXD9 as SCI9 UART peripheral pins.
 - Stacks tab:
-  - Keep SCI9 UART enabled at 115200 baud.
+  - Keep SCI9 UART enabled at 460800 baud.
   - Add/keep `SPI on SCI_B_SPI` named `g_sci_spi_h` on channel 2.
   - Configure `g_sci_spi_h`: master, CPOL low, CPHA edge even, MSB first, 100000 baud, no DTC/DMAC.
   - Add/keep `Timer, General PWM (r_gpt)` named `g_adc_sample_timer` on GPT0.
@@ -208,7 +208,7 @@ Low-output route-quality diagnosis from the host:
 ```bash
 .venv/bin/python3 host/diagnose_invalid_routes.py \
   --port /dev/ttyACM0 \
-  --baud 115200 \
+  --baud 460800 \
   --samples 256 \
   --settle-ms 20 \
   --rate 200000 \
@@ -233,7 +233,7 @@ gain settings and plot them side by side:
 MPLCONFIGDIR=/tmp/mpl .venv/bin/python3 host/compare_gain_waveforms.py \
   --reset \
   --port /dev/ttyACM0 \
-  --baud 115200 \
+  --baud 460800 \
   --samples 512 \
   --rate 200000 \
   --settle-ms 20 \
@@ -258,7 +258,7 @@ Manual ADC route scan from the host, without using firmware `scanraw`:
 ```bash
 python host/manual_adc_scan.py \
   --port /dev/ttyACM0 \
-  --baud 115200 \
+  --baud 460800 \
   --electrodes 8 \
   --samples 512 \
   --rate 200000 \
@@ -329,7 +329,7 @@ Live plot MCU reconstruction frames directly from serial:
 ```bash
 MPLCONFIGDIR=/tmp/mpl .venv/bin/python3 host/plot_recon_live.py \
   --port /dev/ttyACM0 \
-  --baud 115200 \
+  --baud 460800 \
   --reset \
   --baseline-frames 5 \
   --baseline-samples 256 \
@@ -368,7 +368,7 @@ tool with the RA8D1 serial port:
 ```bash
 ../pico2_eit_validation/.venv/bin/python -u ../pico_pio_dma_eit/host/reconstruct_eit_live.py \
   --port /dev/ttyACM0 \
-  --baud 115200 \
+  --baud 460800 \
   --electrodes 8 \
   --samples 256 \
   --settle-ms 20 \

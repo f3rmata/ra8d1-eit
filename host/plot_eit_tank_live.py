@@ -15,6 +15,8 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from serial_lines import SerialLineReader, clean_protocol_line, write_command
+
 try:
     import serial
 except ImportError:
@@ -48,7 +50,7 @@ class Frame:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Continuously capture scanraw frames and draw an 8-electrode EIT tank image")
     parser.add_argument("--port", required=True, help="USB serial port, for example /dev/ttyACM0")
-    parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--baud", type=int, default=460800)
     parser.add_argument("--electrodes", type=int, default=8, help="physical S1..S_n electrode count")
     parser.add_argument("--samples", type=int, default=256, help="ADC samples per route")
     parser.add_argument("--settle-ms", type=int, default=2)
@@ -80,22 +82,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def clean_line(line: str) -> str:
-    for marker in ("FRAME_BEGIN", "STAT_BEGIN", "ROUTE", "END", "SCAN_DONE", "STAT_DONE", "ERR:", "bad command"):
-        index = line.find(marker)
-        if index >= 0:
-            return line[index:]
-    return line.strip()
+    return clean_protocol_line(
+        line,
+        ("FRAME_BEGIN", "STAT_BEGIN", "ROUTE", "END", "SCAN_DONE", "STAT_DONE", "ERR:", "bad command"),
+    )
 
 
 def send_command_and_drain(ser: "serial.Serial", command: str, args: argparse.Namespace, wait_s: float = 0.4) -> None:
-    ser.write((command.rstrip() + "\r\n").encode())
-    ser.flush()
+    reader = SerialLineReader(ser)
+    write_command(ser, command)
     deadline = time.monotonic() + wait_s
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
+    while True:
+        decoded = reader.read_line(deadline)
+        if decoded is None:
+            return
         if args.debug:
             print("serial:", repr(decoded))
 
@@ -114,15 +114,15 @@ def init_board(ser: "serial.Serial", args: argparse.Namespace) -> None:
 
 
 def capture_frame(ser: "serial.Serial", args: argparse.Namespace) -> Frame:
-    command = "scanraw {} {} {} {} {} {}\r\n".format(
+    command = "scanraw {} {} {} {} {} {}".format(
         args.electrodes,
         args.samples,
         args.settle_ms,
         args.rate,
         args.raw_pp_limit,
         args.raw_retries,
-    ).encode()
-    recent: list[str] = []
+    )
+    reader = SerialLineReader(ser, recent_limit=20)
     frame_id: int | None = None
     electrodes = args.electrodes
     sample_rate_hz = float(args.rate)
@@ -136,19 +136,15 @@ def capture_frame(ser: "serial.Serial", args: argparse.Namespace) -> Frame:
         return max(0, electrodes * (electrodes - 3))
 
     ser.reset_input_buffer()
-    ser.write(command)
-    ser.flush()
+    write_command(ser, command)
 
     deadline = time.monotonic() + args.timeout
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
+    while True:
+        decoded = reader.read_line(deadline)
+        if decoded is None:
+            break
         deadline = time.monotonic() + args.timeout
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
         line = clean_line(decoded)
-        recent.append(decoded)
-        recent = recent[-20:]
         if args.debug:
             print("serial:", repr(decoded))
         if not line:
@@ -216,21 +212,21 @@ def capture_frame(ser: "serial.Serial", args: argparse.Namespace) -> Frame:
     raise TimeoutError(
         "Timed out waiting for SCAN_DONE; {}. Recent serial lines:\n{}".format(
             detail,
-            "\n".join(recent),
+            reader.format_recent(),
         )
     )
 
 
 def capture_stat_frame(ser: "serial.Serial", args: argparse.Namespace) -> tuple[Frame, list[dict[str, float | int]]]:
-    command = "scanstat {} {} {} {} {} {}\r\n".format(
+    command = "scanstat {} {} {} {} {} {}".format(
         args.electrodes,
         args.samples,
         args.settle_ms,
         args.rate,
         args.stat_pp_limit,
         args.stat_retries,
-    ).encode()
-    recent: list[str] = []
+    )
+    reader = SerialLineReader(ser, recent_limit=20)
     frame_id: int | None = None
     electrodes = args.electrodes
     samples_per_route = args.samples
@@ -242,19 +238,15 @@ def capture_stat_frame(ser: "serial.Serial", args: argparse.Namespace) -> tuple[
         return max(0, electrodes * (electrodes - 3))
 
     ser.reset_input_buffer()
-    ser.write(command)
-    ser.flush()
+    write_command(ser, command)
 
     deadline = time.monotonic() + args.timeout
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
+    while True:
+        decoded = reader.read_line(deadline)
+        if decoded is None:
+            break
         deadline = time.monotonic() + args.timeout
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
         line = clean_line(decoded)
-        recent.append(decoded)
-        recent = recent[-20:]
         if args.debug:
             print("serial:", repr(decoded))
         if not line:
@@ -337,7 +329,7 @@ def capture_stat_frame(ser: "serial.Serial", args: argparse.Namespace) -> tuple[
         "Timed out waiting for STAT_DONE; received {}/{} routes. Recent serial lines:\n{}".format(
             len(rows),
             expected_route_count(),
-            "\n".join(recent),
+            reader.format_recent(),
         )
     )
 

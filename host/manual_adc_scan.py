@@ -20,11 +20,13 @@ try:
 except ImportError:
     plt = None
 
+from serial_lines import SerialLineReader, clean_protocol_line, write_command
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Manually route ADG731 channels and capture raw ADC waveforms")
     parser.add_argument("--port", required=True, help="USB serial port, for example /dev/ttyACM0")
-    parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--baud", type=int, default=460800)
     parser.add_argument("--electrodes", type=int, default=8)
     parser.add_argument("--samples", type=int, default=512)
     parser.add_argument("--rate", type=int, default=200000, help="ADC capture rate in samples/s")
@@ -42,52 +44,45 @@ def parse_args() -> argparse.Namespace:
 
 
 def clean_line(line: str) -> str:
-    for marker in ("ADC_BEGIN", "ADC_END", "ERR:", "bad command", "raw ok", "raw spi_error", "all mux off"):
-        index = line.find(marker)
-        if index >= 0:
-            return line[index:]
-    return line.strip()
+    return clean_protocol_line(
+        line,
+        ("ADC_BEGIN", "ADC_END", "ERR:", "bad command", "raw ok", "raw spi_error", "all mux off"),
+    )
 
 
 def read_lines_for(ser: "serial.Serial", seconds: float, debug: bool = False) -> list[str]:
     lines: list[str] = []
+    reader = SerialLineReader(ser)
     deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
+    while True:
+        decoded = reader.read_line(deadline)
+        if decoded is None:
+            return lines
         if debug:
             print("serial:", repr(decoded))
         lines.append(clean_line(decoded))
-    return lines
 
 
 def send_command(ser: "serial.Serial", command: str, wait_s: float, debug: bool = False) -> list[str]:
-    ser.write((command + "\r\n").encode())
-    ser.flush()
+    write_command(ser, command)
     time.sleep(wait_s)
     return read_lines_for(ser, 0.05, debug)
 
 
 def capture_adc(ser: "serial.Serial", samples: int, rate: int, timeout: float, debug: bool = False) -> list[int]:
     values: list[int] = []
-    recent: list[str] = []
     in_block = False
+    reader = SerialLineReader(ser, recent_limit=16)
 
     ser.reset_input_buffer()
-    ser.write(f"adc {samples} {rate}\r\n".encode())
-    ser.flush()
+    write_command(ser, f"adc {samples} {rate}")
 
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
+    while True:
+        decoded = reader.read_line(deadline)
+        if decoded is None:
+            break
         line = clean_line(decoded)
-        recent.append(decoded)
-        recent = recent[-16:]
         if debug:
             print("serial:", repr(decoded))
 
@@ -105,7 +100,7 @@ def capture_adc(ser: "serial.Serial", samples: int, rate: int, timeout: float, d
         if len(parts) == 2:
             values.append(int(parts[1], 0))
 
-    raise TimeoutError(f"timed out waiting for ADC_END; captured {len(values)} samples\n" + "\n".join(recent))
+    raise TimeoutError(f"timed out waiting for ADC_END; captured {len(values)} samples\n" + reader.format_recent())
 
 
 def route_list(electrodes: int, one_route: list[int] | None, max_routes: int) -> list[tuple[int, int, int, int]]:

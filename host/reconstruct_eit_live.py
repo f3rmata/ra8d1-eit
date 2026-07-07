@@ -15,6 +15,8 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from serial_lines import SerialLineReader, clean_protocol_line, write_command
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PYEIT_ROOT = REPO_ROOT / "pyEIT"
 if str(PYEIT_ROOT) not in sys.path:
@@ -95,7 +97,7 @@ def rotate_plot_points_s1_up(points: np.ndarray) -> np.ndarray:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Live pyEIT/JAC reconstruction from Pico PIO scanstat frames")
     parser.add_argument("--port", required=True, help="USB serial port, for example /dev/ttyACM0")
-    parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--baud", type=int, default=460800)
     parser.add_argument("--electrodes", type=int, default=8)
     parser.add_argument("--samples", type=int, default=256)
     parser.add_argument("--settle-ms", type=int, default=20)
@@ -162,14 +164,13 @@ def row_is_valid(row: StatRow) -> bool:
 
 
 def send_command_and_drain(ser: "serial.Serial", command: str, debug: bool, wait_s: float = 0.4) -> None:
-    ser.write((command.rstrip() + "\r\n").encode())
-    ser.flush()
+    reader = SerialLineReader(ser)
+    write_command(ser, command)
     deadline = time.monotonic() + wait_s
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
+    while True:
+        decoded = reader.read_line(deadline)
+        if decoded is None:
+            return
         if debug:
             print("serial:", repr(decoded))
 
@@ -189,35 +190,34 @@ def expected_route_count(electrodes: int) -> int:
 
 
 def capture_stat_frame_once(ser: "serial.Serial", args: argparse.Namespace) -> StatFrame:
-    command = "scanstat {} {} {} {} {} {}\r\n".format(
+    command = "scanstat {} {} {} {} {} {}".format(
         args.electrodes,
         args.samples,
         args.settle_ms,
         args.rate,
         args.stat_pp_limit,
         args.stat_retries,
-    ).encode()
+    )
     rows: list[StatRow] = []
     frame_id: int | None = None
     electrodes = args.electrodes
     scale = args.vref / 1023.0
-    recent: list[str] = []
+    reader = SerialLineReader(ser, recent_limit=20)
     malformed: list[str] = []
 
     ser.reset_input_buffer()
-    ser.write(command)
-    ser.flush()
+    write_command(ser, command)
 
     deadline = time.monotonic() + args.timeout
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
+    while True:
+        decoded = reader.read_line(deadline)
+        if decoded is None:
+            break
         deadline = time.monotonic() + args.timeout
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
-        recent.append(decoded)
-        recent = recent[-20:]
-        line = decoded.strip()
+        line = clean_protocol_line(
+            decoded,
+            ("STAT_BEGIN", "STAT_DONE", "route,", "STAT_ROUTE_BEGIN", "ERR:", "bad command"),
+        )
         if args.debug:
             print("serial:", repr(line))
         if not line:
@@ -287,7 +287,7 @@ def capture_stat_frame_once(ser: "serial.Serial", args: argparse.Namespace) -> S
                 )
             )
 
-    raise TimeoutError("Timed out waiting for STAT_DONE. Recent serial lines:\n{}".format("\n".join(recent)))
+    raise TimeoutError("Timed out waiting for STAT_DONE. Recent serial lines:\n{}".format(reader.format_recent()))
 
 
 def capture_stat_frame(ser: "serial.Serial", args: argparse.Namespace) -> StatFrame:

@@ -24,6 +24,8 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise RuntimeError("pyserial is required. Use the project .venv or install pyserial.") from exc
 
+from serial_lines import SerialLineReader, clean_protocol_line
+
 
 @dataclass(frozen=True)
 class Route:
@@ -52,7 +54,7 @@ class Capture:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Capture and plot raw EIT ADC waveforms for gain tuning")
     parser.add_argument("--port", default="/dev/ttyACM0")
-    parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--baud", type=int, default=460800)
     parser.add_argument("--electrodes", type=int, default=8)
     parser.add_argument("--samples", type=int, default=512)
     parser.add_argument("--rate", type=int, default=200000)
@@ -135,25 +137,20 @@ def selected_routes(args: argparse.Namespace) -> list[Route]:
 
 def clean_line(line: str) -> str:
     markers = ("ADC_BEGIN", "ADC_END", "ERR:", "bad command", "raw ok", "raw spi_error", "all mux off", "power ok", "gain drive=")
-    for marker in markers:
-        index = line.find(marker)
-        if index >= 0:
-            return line[index:]
-    return line.strip()
+    return clean_protocol_line(line, markers)
 
 
 def drain_idle(ser: "serial.Serial", idle_s: float, max_s: float, debug: bool) -> None:
     deadline = time.monotonic() + max_s
     idle_deadline = time.monotonic() + idle_s
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            if time.monotonic() >= idle_deadline:
-                return
-            continue
+    reader = SerialLineReader(ser)
+    while True:
+        decoded = reader.read_line(min(deadline, idle_deadline))
+        if decoded is None:
+            return
         idle_deadline = time.monotonic() + idle_s
         if debug:
-            print("drain:", repr(raw.decode("utf-8", errors="replace").rstrip()))
+            print("drain:", repr(decoded))
 
 
 def write_command(ser: "serial.Serial", command: str) -> None:
@@ -182,13 +179,13 @@ def run_until(
     started = start_marker is None
     start_deadline = time.monotonic() + min(5.0, timeout)
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
+    reader = SerialLineReader(ser)
+    while True:
+        decoded = reader.read_line(min(deadline, start_deadline) if not started else deadline)
+        if decoded is None:
             if (not started) and time.monotonic() >= start_deadline:
                 break
-            continue
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
+            break
         line = clean_line(decoded)
         if debug:
             print("serial:", repr(decoded))

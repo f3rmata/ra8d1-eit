@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 import numpy as np
 
+from serial_lines import SerialLineReader, clean_protocol_line
+
 try:
     import serial
 except ImportError as exc:  # pragma: no cover - depends on local env
@@ -54,7 +56,7 @@ class PlotView:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Live plot RA8D1 MCU-side EIT reconstruction frames")
     parser.add_argument("--port", required=True, help="USB serial port, for example /dev/ttyACM0")
-    parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--baud", type=int, default=460800)
     parser.add_argument("--electrodes", type=int, default=8)
     parser.add_argument("--samples", type=int, default=256)
     parser.add_argument("--settle-ms", type=int, default=20)
@@ -107,10 +109,9 @@ def clean_line(line: str) -> str:
         "bad command",
         "node,x,y,ds",
     )
-    for marker in markers:
-        index = line.find(marker)
-        if index >= 0:
-            return line[index:]
+    cleaned = clean_protocol_line(line, markers)
+    if cleaned != line.strip():
+        return cleaned
     stripped = line.strip()
     if stripped and stripped[0].isdigit():
         return stripped
@@ -118,13 +119,13 @@ def clean_line(line: str) -> str:
 
 
 def send_command_and_drain(ser: "serial.Serial", command: str, args: argparse.Namespace, wait_s: float = 0.4) -> None:
+    reader = SerialLineReader(ser)
     write_command(ser, command)
     deadline = time.monotonic() + wait_s
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
+    while True:
+        decoded = reader.read_line(deadline)
+        if decoded is None:
+            return
         if args.debug:
             print("serial:", repr(decoded))
 
@@ -133,15 +134,12 @@ def run_simple_command(ser: "serial.Serial", command: str, end_marker: str, args
     drain_idle(ser, idle_s=0.15, max_s=1.0, debug=args.debug)
     write_command(ser, command)
     deadline = time.monotonic() + 5.0
-    recent: list[str] = []
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
+    reader = SerialLineReader(ser, recent_limit=10)
+    while True:
+        decoded = reader.read_line(deadline)
+        if decoded is None:
+            break
         line = clean_line(decoded)
-        recent.append(decoded)
-        recent = recent[-10:]
         if args.debug:
             print("serial:", repr(decoded))
         if line.startswith(end_marker) or line == end_marker:
@@ -149,7 +147,7 @@ def run_simple_command(ser: "serial.Serial", command: str, end_marker: str, args
         if line.startswith("ERR:") or line.startswith("bad command"):
             raise RuntimeError(line)
     raise TimeoutError("Timed out waiting for {} after {!r}. Recent:\n{}".format(
-        end_marker, command, "\n".join(recent)
+        end_marker, command, reader.format_recent()
     ))
 
 
@@ -168,15 +166,18 @@ def write_command(ser: "serial.Serial", command: str) -> None:
 def drain_idle(ser: "serial.Serial", idle_s: float, max_s: float, debug: bool) -> None:
     deadline = time.monotonic() + max_s
     idle_deadline = time.monotonic() + idle_s
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
+    reader = SerialLineReader(ser)
+    while True:
+        decoded = reader.read_line(min(deadline, idle_deadline))
+        if decoded is None:
+            return
+        if not decoded:
             if time.monotonic() >= idle_deadline:
                 return
             continue
         idle_deadline = time.monotonic() + idle_s
         if debug:
-            print("drain:", repr(raw.decode("utf-8", errors="replace").rstrip()))
+            print("drain:", repr(decoded))
 
 
 def wait_for_prompt(ser: "serial.Serial", timeout: float, debug: bool) -> None:
@@ -260,20 +261,17 @@ def capture_baseline(ser: "serial.Serial", args: argparse.Namespace) -> None:
     drain_idle(ser, idle_s=0.15, max_s=1.0, debug=args.debug)
     write_command(ser, command)
 
-    recent: list[str] = []
+    reader = SerialLineReader(ser, recent_limit=20)
     deadline = time.monotonic() + max(args.timeout, args.baseline_frames * args.timeout)
     started = False
     start_deadline = time.monotonic() + 8.0
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
+    while True:
+        decoded = reader.read_line(min(deadline, start_deadline) if not started else deadline)
+        if decoded is None:
             if (not started) and time.monotonic() >= start_deadline:
                 raise TimeoutError("Timed out waiting for RECONBASE_BEGIN after {!r}".format(command))
-            continue
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
+            break
         line = clean_line(decoded)
-        recent.append(decoded)
-        recent = recent[-20:]
         if args.debug:
             print("serial:", repr(decoded))
         if not started:
@@ -289,12 +287,12 @@ def capture_baseline(ser: "serial.Serial", args: argparse.Namespace) -> None:
             print(line, flush=True)
             return
 
-    raise TimeoutError("Timed out waiting for RECONBASE_DONE. Recent serial lines:\n{}".format("\n".join(recent)))
+    raise TimeoutError("Timed out waiting for RECONBASE_DONE. Recent serial lines:\n{}".format(reader.format_recent()))
 
 
 def capture_recon_frame(ser: "serial.Serial", args: argparse.Namespace) -> ReconFrame:
     command = recon_command(args)
-    recent: list[str] = []
+    reader = SerialLineReader(ser, recent_limit=20)
     frame_id: int | None = None
     electrodes = args.electrodes
     routes = 0
@@ -309,17 +307,14 @@ def capture_recon_frame(ser: "serial.Serial", args: argparse.Namespace) -> Recon
     deadline = time.monotonic() + args.timeout
     started = False
     start_deadline = time.monotonic() + 8.0
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
+    while True:
+        decoded = reader.read_line(min(deadline, start_deadline) if not started else deadline)
+        if decoded is None:
             if (not started) and time.monotonic() >= start_deadline:
                 raise TimeoutError("Timed out waiting for RECON_BEGIN after {!r}".format(command))
-            continue
+            break
         deadline = time.monotonic() + args.timeout
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
         line = clean_line(decoded)
-        recent.append(decoded)
-        recent = recent[-20:]
         if args.debug:
             print("serial:", repr(decoded))
         if not line:
@@ -367,12 +362,12 @@ def capture_recon_frame(ser: "serial.Serial", args: argparse.Namespace) -> Recon
             if len(parts) == 4:
                 rows.append((int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])))
 
-    raise TimeoutError("Timed out waiting for RECON_DONE. Recent serial lines:\n{}".format("\n".join(recent)))
+    raise TimeoutError("Timed out waiting for RECON_DONE. Recent serial lines:\n{}".format(reader.format_recent()))
 
 
 def capture_reconfast_frame(ser: "serial.Serial", args: argparse.Namespace, template_nodes: np.ndarray) -> ReconFrame:
     command = recon_command(args, fast=True)
-    recent: list[str] = []
+    reader = SerialLineReader(ser, recent_limit=20)
     frame_id: int | None = None
     electrodes = args.electrodes
     routes = 0
@@ -386,17 +381,14 @@ def capture_reconfast_frame(ser: "serial.Serial", args: argparse.Namespace, temp
     deadline = time.monotonic() + args.timeout
     started = False
     start_deadline = time.monotonic() + 8.0
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
+    while True:
+        decoded = reader.read_line(min(deadline, start_deadline) if not started else deadline)
+        if decoded is None:
             if (not started) and time.monotonic() >= start_deadline:
                 raise TimeoutError("Timed out waiting for RECONFAST_BEGIN after {!r}".format(command))
-            continue
+            break
         deadline = time.monotonic() + args.timeout
-        decoded = raw.decode("utf-8", errors="replace").rstrip()
         line = clean_line(decoded)
-        recent.append(decoded)
-        recent = recent[-20:]
         if args.debug:
             print("serial:", repr(decoded))
         if not line:
@@ -441,7 +433,7 @@ def capture_reconfast_frame(ser: "serial.Serial", args: argparse.Namespace, temp
             nodes[:, 3] = ds_values
             return ReconFrame(frame_id, electrodes, routes, nodes, summary)
 
-    raise TimeoutError("Timed out waiting for RECONFAST_DONE. Recent serial lines:\n{}".format("\n".join(recent)))
+    raise TimeoutError("Timed out waiting for RECONFAST_DONE. Recent serial lines:\n{}".format(reader.format_recent()))
 
 
 def save_nodes(path: Path, frame: ReconFrame) -> None:

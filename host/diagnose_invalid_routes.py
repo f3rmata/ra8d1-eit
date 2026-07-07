@@ -11,6 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
+from serial_lines import SerialLineReader, clean_protocol_line
+
 try:
     import serial
 except ImportError as exc:  # pragma: no cover
@@ -61,7 +63,7 @@ class RawBlock:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Capture scanstat/scanraw and diagnose invalid EIT routes")
     parser.add_argument("--port", default="/dev/ttyACM0")
-    parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--baud", type=int, default=460800)
     parser.add_argument("--electrodes", type=int, default=8)
     parser.add_argument("--samples", type=int, default=128)
     parser.add_argument("--settle-ms", type=int, default=5)
@@ -92,10 +94,9 @@ def clean_line(line: str) -> str:
         "ERR:",
         "bad command",
     )
-    for marker in markers:
-        index = line.find(marker)
-        if index >= 0:
-            return line[index:]
+    cleaned = clean_protocol_line(line, markers)
+    if cleaned != line.strip():
+        return cleaned
     stripped = line.strip()
     if stripped and stripped[0].isdigit():
         return stripped
@@ -119,13 +120,13 @@ def run_until(
         started = start_marker is None
         deadline = time.monotonic() + timeout
         start_deadline = time.monotonic() + min(start_timeout, timeout)
-        while time.monotonic() < deadline:
-            raw = ser.readline()
-            if not raw:
+        reader = SerialLineReader(ser)
+        while True:
+            decoded = reader.read_line(min(deadline, start_deadline) if not started else deadline)
+            if decoded is None:
                 if (not started) and time.monotonic() >= start_deadline:
                     break
-                continue
-            decoded = raw.decode("utf-8", errors="replace").rstrip()
+                break
             line = clean_line(decoded)
             if debug:
                 print("serial:", repr(decoded))
@@ -148,15 +149,14 @@ def run_until(
 def drain_idle(ser: "serial.Serial", idle_s: float, max_s: float, debug: bool) -> None:
     deadline = time.monotonic() + max_s
     idle_deadline = time.monotonic() + idle_s
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            if time.monotonic() >= idle_deadline:
-                return
-            continue
+    reader = SerialLineReader(ser)
+    while True:
+        decoded = reader.read_line(min(deadline, idle_deadline))
+        if decoded is None:
+            return
         idle_deadline = time.monotonic() + idle_s
         if debug:
-            print("drain:", repr(raw.decode("utf-8", errors="replace").rstrip()))
+            print("drain:", repr(decoded))
 
 
 def write_command(ser: "serial.Serial", command: str) -> None:
@@ -174,15 +174,16 @@ def write_command(ser: "serial.Serial", command: str) -> None:
 def wait_for_idle(ser: "serial.Serial", timeout: float, idle_s: float, debug: bool) -> None:
     deadline = time.monotonic() + timeout
     idle_deadline = time.monotonic() + idle_s
-    while time.monotonic() < deadline:
-        raw = ser.readline()
-        if not raw:
-            if time.monotonic() >= idle_deadline:
-                return
-            continue
+    reader = SerialLineReader(ser)
+    while True:
+        decoded = reader.read_line(min(deadline, idle_deadline))
+        if decoded is None:
+            if time.monotonic() >= deadline:
+                break
+            return
         idle_deadline = time.monotonic() + idle_s
         if debug:
-            print("drain:", repr(raw.decode("utf-8", errors="replace").rstrip()))
+            print("drain:", repr(decoded))
     raise TimeoutError("Serial did not become idle before initialization")
 
 
