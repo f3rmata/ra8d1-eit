@@ -179,6 +179,10 @@ versions into `script/` before running the CMake build.
 - `eit_adc_capture()` uses GPT0-triggered DMAC to copy `R_PORT0->PIDR` into the sample buffer. The requested sample
   rate is applied at runtime with `periodSet(PCLKD / rate_hz)`.
 - Physical bit order matches the Pico firmware's GPIO sampling order, so the 10-bit word must be passed through `reverse10()` after reading P001..P009/P011.
+- After decode, firmware removes isolated single-sample spikes. If both neighbor
+  samples are valid and close to each other, a single `0/1023` rail sample or a
+  jump larger than 128 codes is replaced with the neighbor average. Consecutive
+  clipping is left unchanged.
 - `scanraw` prints decoded raw samples after this bit reversal. If the reversal is removed, raw values look like full-scale random jumps even at low sample rates.
 - Current `scanstat` is for 10 kHz excitation. It synchronously demodulates each raw route at 10 kHz and writes the fitted amplitude into the existing `mean_code` column for Pico host compatibility. `pp_code` remains diagnostic only; large peak-to-peak is expected for a real AC waveform.
 

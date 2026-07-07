@@ -15,7 +15,7 @@ bsp_ipc_semaphore_handle_t g_core_start_semaphore =
 };
 #endif
 
-#define FW_VERSION              "ra8d1-eit-p0-dma-ac10k-subcs-cpha-v1"
+#define FW_VERSION              "ra8d1-eit-p0-dma-ac10k-subcs-cpha-filter-v1"
 #define LED1_PIN                BSP_IO_PORT_01_PIN_06
 #define LED_BLINK_DELAY_MS      (500U)
 #define UART9_TX_TIMEOUT_MS     (100U)

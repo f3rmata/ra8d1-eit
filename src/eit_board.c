@@ -11,6 +11,8 @@
 #define EIT_SPI_GAP_US   (10U)
 #define EIT_SPI_TIMEOUT_MS (20U)
 #define EIT_ADC_CAPTURE_TIMEOUT_EXTRA_MS (1000U)
+#define EIT_ADC_SPIKE_DELTA (128U)
+#define EIT_ADC_SPIKE_NEIGHBOR_DELTA (64U)
 
 typedef struct st_eit_pin_desc
 {
@@ -39,6 +41,8 @@ static void print_pin(eit_text_writer_t writer, eit_pin_desc_t const * p_pin);
 static bool hw_spi_write(uint8_t const * p_data, uint32_t length);
 static uint16_t adc_reverse10(uint16_t value);
 static uint16_t adc_decode_pidr(uint16_t pidr);
+static void adc_filter_single_sample_spikes(uint16_t * p_samples, uint32_t samples);
+static uint16_t adc_abs_diff(uint16_t a, uint16_t b);
 static bsp_io_port_pin_t mux_cs_pin(uint32_t mux);
 
 /*
@@ -413,6 +417,7 @@ bool eit_adc_capture(uint16_t * p_out, uint32_t samples, uint32_t rate_hz)
     {
         p_out[i] = adc_decode_pidr(p_out[i]);
     }
+    adc_filter_single_sample_spikes(p_out, samples);
     return true;
 }
 
@@ -420,6 +425,43 @@ static uint16_t adc_decode_pidr(uint16_t pidr)
 {
     uint16_t raw = (uint16_t) (((pidr >> 1) & 0x01FFU) | ((pidr >> 2) & 0x0200U));
     return adc_reverse10(raw);
+}
+
+static void adc_filter_single_sample_spikes(uint16_t * p_samples, uint32_t samples)
+{
+    if ((NULL == p_samples) || (samples < 3U))
+    {
+        return;
+    }
+
+    for (uint32_t i = 1U; i < (samples - 1U); i++)
+    {
+        uint16_t prev = p_samples[i - 1U];
+        uint16_t cur = p_samples[i];
+        uint16_t next = p_samples[i + 1U];
+        bool neighbors_valid = (prev > 2U) && (prev < 1021U) && (next > 2U) && (next < 1021U);
+        if (!neighbors_valid)
+        {
+            continue;
+        }
+        if (adc_abs_diff(prev, next) > EIT_ADC_SPIKE_NEIGHBOR_DELTA)
+        {
+            continue;
+        }
+
+        bool rail_spike = (cur <= 2U) || (cur >= 1021U);
+        bool jump_spike = (adc_abs_diff(cur, prev) > EIT_ADC_SPIKE_DELTA) &&
+                          (adc_abs_diff(cur, next) > EIT_ADC_SPIKE_DELTA);
+        if (rail_spike || jump_spike)
+        {
+            p_samples[i] = (uint16_t) (((uint32_t) prev + (uint32_t) next + 1U) / 2U);
+        }
+    }
+}
+
+static uint16_t adc_abs_diff(uint16_t a, uint16_t b)
+{
+    return (a >= b) ? (uint16_t) (a - b) : (uint16_t) (b - a);
 }
 
 static bsp_io_port_pin_t mux_cs_pin(uint32_t mux)

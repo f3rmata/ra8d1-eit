@@ -4,3 +4,6 @@
 build
 raw_compare_ra8d1
 Debug
+.venv
+eit_reconstruct_live
+empty_tank_ra8d1
