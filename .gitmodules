@@ -1,0 +1,3 @@
+[submodule "ruhmi-framework-mcu"]
+	path = ruhmi-framework-mcu
+	url = https://github.com/renesas/ruhmi-framework-mcu.git
