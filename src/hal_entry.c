@@ -22,7 +22,10 @@ bsp_ipc_semaphore_handle_t g_core_start_semaphore =
 
 #define FW_VERSION              "ra8d1-eit-p0-dma-ac10k-picostat-cpha-even-v1"
 #define LED1_PIN                BSP_IO_PORT_01_PIN_06
+#define USER_BUTTON_PIN         BSP_IO_PORT_09_PIN_07
 #define LED_BLINK_DELAY_MS      (500U)
+#define USER_BUTTON_DEBOUNCE_MS (40U)
+#define LCD_GESTURE_STEP_MS     (6000U)
 #define UART9_TX_TIMEOUT_MS     (100U)
 #define UART9_BAUD              (460800U)
 #define UART9_BAUD_MAX_ERROR_X1000 (5000U)
@@ -83,6 +86,19 @@ typedef struct st_scan_stat
     uint32_t retry_count;
 } scan_stat_t;
 
+typedef enum e_lcd_mode
+{
+    LCD_MODE_RECON = 0,
+    LCD_MODE_GESTURE_CYCLE
+} lcd_mode_t;
+
+typedef enum e_lcd_gesture
+{
+    LCD_GESTURE_ROCK = 0,
+    LCD_GESTURE_PAPER,
+    LCD_GESTURE_SCISSORS
+} lcd_gesture_t;
+
 static void uart9_write_string(char const * p_text);
 static void uart9_write_bytes(uint8_t const * p_data, uint32_t length);
 static void uart9_configure_baud(void);
@@ -110,6 +126,7 @@ static void command_recon_common(char * p, bool fast);
 static void command_reconbase(char * p);
 static void command_recondump(void);
 static void command_lcdtest(char * p);
+static void command_lcdmode(char * p);
 static void command_icon(char * p);
 static void command_raw(char * p, bool all_off_first);
 static void compute_scan_stat(uint16_t const * p_samples,
@@ -156,6 +173,18 @@ static void put_le32(uint8_t * p_dst, uint32_t value);
 static void put_le_float32(uint8_t * p_dst, float value);
 static uint16_t crc16_ccitt_update(uint16_t crc, uint8_t byte);
 static void led_heartbeat(void);
+static void app_time_init(void);
+static uint32_t app_millis(void);
+static void lcd_switch_init(void);
+static void lcd_button_poll(void);
+static void lcd_display_service(void);
+static void lcd_show_recon_or_gesture(float const ds_node[EIT_RECON_NODES],
+                                      eit_recon_summary_t const * p_summary,
+                                      uint32_t frame_id);
+static void lcd_mode_enter_gesture(uint32_t now_ms);
+static void lcd_mode_enter_recon(void);
+static void lcd_mode_toggle(uint32_t now_ms);
+static char const * lcd_mode_name(void);
 
 static volatile bool g_uart9_tx_complete = false;
 static volatile bool g_uart9_error = false;
@@ -166,6 +195,32 @@ static uint32_t g_frame_id = 0U;
 static uint16_t g_last_drive_gain = 512U;
 static uint16_t g_last_meas_gain = 512U;
 static uint16_t g_scan_hist[1024];
+static bool g_app_time_ready = false;
+static uint32_t g_time_last_cycles = 0U;
+static uint32_t g_time_cycle_remainder = 0U;
+static uint32_t g_time_ms = 0U;
+static uint32_t g_cycles_per_ms = 1U;
+static lcd_gesture_t const g_lcd_gesture_sequence[] =
+{
+    LCD_GESTURE_ROCK,
+    LCD_GESTURE_PAPER,
+    LCD_GESTURE_SCISSORS,
+    LCD_GESTURE_PAPER,
+    LCD_GESTURE_ROCK,
+    LCD_GESTURE_SCISSORS,
+    LCD_GESTURE_ROCK,
+    LCD_GESTURE_PAPER,
+};
+static lcd_mode_t g_lcd_mode = LCD_MODE_RECON;
+static uint32_t g_lcd_gesture_sequence_index = 0U;
+static lcd_gesture_t g_lcd_gesture = LCD_GESTURE_ROCK;
+static lcd_gesture_t g_lcd_rendered_gesture = LCD_GESTURE_SCISSORS;
+static uint32_t g_lcd_gesture_started_ms = 0U;
+static bool g_lcd_gesture_dirty = false;
+static bool g_lcd_recon_status_dirty = false;
+static bool g_user_button_last_raw = false;
+static bool g_user_button_debounced = false;
+static uint32_t g_user_button_changed_ms = 0U;
 
 void hal_entry(void)
 {
@@ -176,6 +231,7 @@ void hal_entry(void)
     }
 
     __enable_irq();
+    app_time_init();
 
     err = g_uart9.p_api->open(g_uart9.p_ctrl, g_uart9.p_cfg);
     if (FSP_SUCCESS != err)
@@ -191,6 +247,7 @@ void hal_entry(void)
         error_blink();
     }
     eit_recon_init();
+    lcd_switch_init();
 
     /* Initialize SDRAM first (framebuffer storage) */
     eit_sdram_init();
@@ -209,6 +266,7 @@ void hal_entry(void)
     while (1)
     {
         led_heartbeat();
+        lcd_display_service();
 
         while (g_uart9_rx_tail != g_uart9_rx_head)
         {
@@ -373,6 +431,10 @@ static void process_line(char * p_line)
     {
         command_lcdtest(p);
     }
+    else if (0 == strcmp(command, "lcdmode"))
+    {
+        command_lcdmode(p);
+    }
     else if (0 == strcmp(command, "icon"))
     {
         command_icon(p);
@@ -408,6 +470,7 @@ static void print_help(void)
     uart9_write_string("  reconbase 8 N 256 20 200000 180 1    average N valid frames into RAM baseline\r\n");
     uart9_write_string("  recondump                             print reconstruction model metadata\r\n");
     uart9_write_string("  lcd [color]                           LCD test: no arg=RGB cycle, arg=0xRRGGBB fill\r\n");
+    uart9_write_string("  lcdmode toggle|gesture|recon          switch LCD recon/gesture-cycle display\r\n");
     uart9_write_string("  icon r|s|p                             gesture icon: rock / scissors / paper\r\n");
     eit_board_print_signals(uart9_write_string);
     uart9_write_string("\r\n");
@@ -902,8 +965,7 @@ static void command_reconfastbin(char * p)
     recon_stats_to_vectors(stats, amp_v, valid, &retry_count);
     eit_recon_solve(amp_v, valid, retry_count, ds_node, &summary);
 
-    /* Display reconstruction result on LCD */
-    eit_ui_show_recon_frame(ds_node, &summary, g_frame_id);
+    lcd_show_recon_or_gesture(ds_node, &summary, g_frame_id);
 
     write_reconfast_binary_frame(g_frame_id, &summary, ds_node);
 }
@@ -959,8 +1021,7 @@ static void command_recon_common(char * p, bool fast)
     recon_stats_to_vectors(stats, amp_v, valid, &retry_count);
     eit_recon_solve(amp_v, valid, retry_count, ds_node, &summary);
 
-    /* Display reconstruction result on LCD */
-    eit_ui_show_recon_frame(ds_node, &summary, g_frame_id);
+    lcd_show_recon_or_gesture(ds_node, &summary, g_frame_id);
 
     uart9_write_string(fast ? "RECONFAST_BEGIN," : "RECON_BEGIN,");
     uart9_write_u32(g_frame_id);
@@ -1158,6 +1219,51 @@ static void command_lcdtest(char * p)
         uart9_write_string("\r\n");
         eit_ui_test_color((uint16_t) color);
     }
+}
+
+static void command_lcdmode(char * p)
+{
+    skip_spaces(&p);
+
+    if ('\0' == *p)
+    {
+        uart9_write_string("lcdmode: ");
+        uart9_write_string(lcd_mode_name());
+        uart9_write_string("\r\n");
+        return;
+    }
+
+    char mode[12] = {0};
+    uint32_t len = 0U;
+    while ((isalnum((unsigned char) *p) || ('_' == *p)) && (len < (sizeof(mode) - 1U)))
+    {
+        mode[len++] = (char) tolower((unsigned char) *p);
+        p++;
+    }
+
+    uint32_t now = app_millis();
+    if ((0 == strcmp(mode, "toggle")) || (0 == strcmp(mode, "t")))
+    {
+        lcd_mode_toggle(now);
+    }
+    else if ((0 == strcmp(mode, "gesture")) || (0 == strcmp(mode, "gestures")) || (0 == strcmp(mode, "cycle")))
+    {
+        lcd_mode_enter_gesture(now);
+    }
+    else if ((0 == strcmp(mode, "recon")) || (0 == strcmp(mode, "eit")))
+    {
+        lcd_mode_enter_recon();
+    }
+    else
+    {
+        uart9_write_string("usage: lcdmode toggle|gesture|recon\r\n");
+        return;
+    }
+
+    lcd_display_service();
+    uart9_write_string("lcdmode: ");
+    uart9_write_string(lcd_mode_name());
+    uart9_write_string("\r\n");
 }
 
 static void command_icon(char * p)
@@ -1565,6 +1671,8 @@ static void led_heartbeat(void)
     static uint32_t elapsed_ms = 0U;
     static bool led_on = false;
 
+    lcd_button_poll();
+
     elapsed_ms++;
     if (elapsed_ms >= LED_BLINK_DELAY_MS)
     {
@@ -1572,6 +1680,211 @@ static void led_heartbeat(void)
         led_on = !led_on;
         R_IOPORT_PinWrite(&g_ioport_ctrl, LED1_PIN, led_on ? BSP_IO_LEVEL_LOW : BSP_IO_LEVEL_HIGH);
     }
+}
+
+static void app_time_init(void)
+{
+    SystemCoreClockUpdate();
+    g_cycles_per_ms = SystemCoreClock / 1000U;
+    if (0U == g_cycles_per_ms)
+    {
+        g_cycles_per_ms = 1U;
+    }
+
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    if (0U != (DWT->CTRL & DWT_CTRL_NOCYCCNT_Msk))
+    {
+        g_app_time_ready = false;
+        return;
+    }
+
+    DWT->CYCCNT = 0U;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    g_time_last_cycles = DWT->CYCCNT;
+    g_time_cycle_remainder = 0U;
+    g_time_ms = 0U;
+    g_app_time_ready = true;
+}
+
+static uint32_t app_millis(void)
+{
+    if (!g_app_time_ready)
+    {
+        return g_time_ms;
+    }
+
+    uint32_t now_cycles = DWT->CYCCNT;
+    uint32_t delta_cycles = now_cycles - g_time_last_cycles;
+    g_time_last_cycles = now_cycles;
+
+    uint64_t total_cycles = (uint64_t) g_time_cycle_remainder + (uint64_t) delta_cycles;
+    uint32_t elapsed_ms = (uint32_t) (total_cycles / (uint64_t) g_cycles_per_ms);
+    g_time_cycle_remainder = (uint32_t) (total_cycles % (uint64_t) g_cycles_per_ms);
+    g_time_ms += elapsed_ms;
+
+    return g_time_ms;
+}
+
+static void lcd_switch_init(void)
+{
+    (void) R_IOPORT_PinCfg(&g_ioport_ctrl,
+                           USER_BUTTON_PIN,
+                           (uint32_t) IOPORT_CFG_PORT_DIRECTION_INPUT |
+                           (uint32_t) IOPORT_CFG_PULLUP_ENABLE);
+
+    bsp_io_level_t level = BSP_IO_LEVEL_HIGH;
+    (void) R_IOPORT_PinRead(&g_ioport_ctrl, USER_BUTTON_PIN, &level);
+
+    uint32_t now = app_millis();
+    bool pressed = (BSP_IO_LEVEL_LOW == level);
+    g_user_button_last_raw = pressed;
+    g_user_button_debounced = pressed;
+    g_user_button_changed_ms = now;
+    g_lcd_gesture_started_ms = now;
+}
+
+static uint32_t lcd_gesture_duration_ms(lcd_gesture_t gesture)
+{
+    (void) gesture;
+    return LCD_GESTURE_STEP_MS;
+}
+
+static lcd_gesture_t lcd_next_gesture(void)
+{
+    g_lcd_gesture_sequence_index++;
+    if (g_lcd_gesture_sequence_index >=
+        (sizeof(g_lcd_gesture_sequence) / sizeof(g_lcd_gesture_sequence[0])))
+    {
+        g_lcd_gesture_sequence_index = 0U;
+    }
+
+    return g_lcd_gesture_sequence[g_lcd_gesture_sequence_index];
+}
+
+static void lcd_button_poll(void)
+{
+    bsp_io_level_t level = BSP_IO_LEVEL_HIGH;
+    if (FSP_SUCCESS != R_IOPORT_PinRead(&g_ioport_ctrl, USER_BUTTON_PIN, &level))
+    {
+        return;
+    }
+
+    uint32_t now = app_millis();
+    bool raw_pressed = (BSP_IO_LEVEL_LOW == level);
+    if (raw_pressed != g_user_button_last_raw)
+    {
+        g_user_button_last_raw = raw_pressed;
+        g_user_button_changed_ms = now;
+    }
+
+    if ((raw_pressed != g_user_button_debounced) &&
+        ((uint32_t) (now - g_user_button_changed_ms) >= USER_BUTTON_DEBOUNCE_MS))
+    {
+        g_user_button_debounced = raw_pressed;
+        if (raw_pressed)
+        {
+            lcd_mode_toggle(now);
+        }
+    }
+}
+
+static void lcd_mode_enter_gesture(uint32_t now_ms)
+{
+    g_lcd_mode = LCD_MODE_GESTURE_CYCLE;
+    g_lcd_gesture_sequence_index = 0U;
+    g_lcd_gesture = g_lcd_gesture_sequence[g_lcd_gesture_sequence_index];
+    g_lcd_rendered_gesture = LCD_GESTURE_SCISSORS;
+    g_lcd_gesture_started_ms = now_ms;
+    g_lcd_gesture_dirty = true;
+    g_lcd_recon_status_dirty = false;
+}
+
+static void lcd_mode_enter_recon(void)
+{
+    g_lcd_mode = LCD_MODE_RECON;
+    g_lcd_gesture_dirty = false;
+    g_lcd_recon_status_dirty = true;
+}
+
+static void lcd_mode_toggle(uint32_t now_ms)
+{
+    if (LCD_MODE_RECON == g_lcd_mode)
+    {
+        lcd_mode_enter_gesture(now_ms);
+    }
+    else
+    {
+        lcd_mode_enter_recon();
+    }
+}
+
+static char const * lcd_mode_name(void)
+{
+    return (LCD_MODE_GESTURE_CYCLE == g_lcd_mode) ? "gesture" : "recon";
+}
+
+static void lcd_draw_gesture(lcd_gesture_t gesture)
+{
+    switch (gesture)
+    {
+        case LCD_GESTURE_ROCK:
+            eit_gesture_draw_rock();
+            break;
+        case LCD_GESTURE_PAPER:
+            eit_gesture_draw_paper();
+            break;
+        case LCD_GESTURE_SCISSORS:
+        default:
+            eit_gesture_draw_scissors();
+            break;
+    }
+}
+
+static void lcd_display_service(void)
+{
+    lcd_button_poll();
+
+    if (LCD_MODE_RECON == g_lcd_mode)
+    {
+        if (g_lcd_recon_status_dirty)
+        {
+            eit_ui_show_status("EIT LCD");
+            g_lcd_recon_status_dirty = false;
+        }
+        return;
+    }
+
+    uint32_t now = app_millis();
+    uint32_t duration = lcd_gesture_duration_ms(g_lcd_gesture);
+    while ((uint32_t) (now - g_lcd_gesture_started_ms) >= duration)
+    {
+        g_lcd_gesture_started_ms += duration;
+        g_lcd_gesture = lcd_next_gesture();
+        duration = lcd_gesture_duration_ms(g_lcd_gesture);
+        g_lcd_gesture_dirty = true;
+    }
+
+    if (g_lcd_gesture_dirty || (g_lcd_rendered_gesture != g_lcd_gesture))
+    {
+        lcd_draw_gesture(g_lcd_gesture);
+        g_lcd_rendered_gesture = g_lcd_gesture;
+        g_lcd_gesture_dirty = false;
+    }
+}
+
+static void lcd_show_recon_or_gesture(float const ds_node[EIT_RECON_NODES],
+                                      eit_recon_summary_t const * p_summary,
+                                      uint32_t frame_id)
+{
+    lcd_button_poll();
+    if (LCD_MODE_GESTURE_CYCLE == g_lcd_mode)
+    {
+        lcd_display_service();
+        return;
+    }
+
+    g_lcd_recon_status_dirty = false;
+    eit_ui_show_recon_frame(ds_node, p_summary, frame_id);
 }
 
 static void uart9_write_u32(uint32_t value)

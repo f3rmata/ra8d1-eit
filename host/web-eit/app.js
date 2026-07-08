@@ -11,6 +11,7 @@ const ui = {
   baselineBtn: $("baselineBtn"),
   startBtn: $("startBtn"),
   stopBtn: $("stopBtn"),
+  lcdToggleBtn: $("lcdToggleBtn"),
   sendBtn: $("sendBtn"),
   clearLogBtn: $("clearLogBtn"),
   commandInput: $("commandInput"),
@@ -57,6 +58,7 @@ const state = {
   running: false,
   busy: false,
   operationInFlight: false,
+  pendingLcdToggle: false,
   templateNodes: null,
   lastFrame: null,
 };
@@ -139,6 +141,7 @@ function updateButtons() {
   ui.baselineBtn.disabled = !idle;
   ui.startBtn.disabled = !idle;
   ui.stopBtn.disabled = !state.running;
+  ui.lcdToggleBtn.disabled = !c || state.busy || (state.operationInFlight && !state.running);
   ui.sendBtn.disabled = !idle;
 }
 
@@ -642,6 +645,7 @@ async function startLoop() {
       drawFrame(frame);
       setFrameStats(frame);
       setStatus(`运行中 frame ${frame.frameId}`, "ok");
+      await flushPendingLcdToggle();
       if (s.intervalMs > 0) {
         await sleep(s.intervalMs);
       }
@@ -1072,6 +1076,45 @@ async function sendManualCommand() {
   }
 }
 
+async function sendLcdToggleCommand() {
+  await drainIdle();
+  await writeCommand("lcdmode toggle");
+}
+
+async function flushPendingLcdToggle() {
+  if (!state.pendingLcdToggle) {
+    return;
+  }
+
+  state.pendingLcdToggle = false;
+  await sendLcdToggleCommand();
+  setStatus("LCD 显示已切换", "ok");
+}
+
+async function toggleLcdDisplay() {
+  if (!state.connected || state.busy) {
+    return;
+  }
+
+  if (state.running || state.operationInFlight) {
+    state.pendingLcdToggle = true;
+    setStatus("LCD 切换已排队，将在当前帧结束后发送", "ok");
+    return;
+  }
+
+  state.operationInFlight = true;
+  setBusy(true);
+  try {
+    await sendLcdToggleCommand();
+    setStatus("LCD 显示已切换", "ok");
+  } catch (error) {
+    setStatus(`LCD 切换失败: ${error.message}`, "error");
+  } finally {
+    state.operationInFlight = false;
+    setBusy(false);
+  }
+}
+
 function drawEmpty() {
   const ctx = ui.canvas.getContext("2d");
   ctx.clearRect(0, 0, ui.canvas.width, ui.canvas.height);
@@ -1090,6 +1133,7 @@ ui.initBtn.addEventListener("click", initBoard);
 ui.baselineBtn.addEventListener("click", captureBaseline);
 ui.startBtn.addEventListener("click", startLoop);
 ui.stopBtn.addEventListener("click", stopLoop);
+ui.lcdToggleBtn.addEventListener("click", toggleLcdDisplay);
 ui.sendBtn.addEventListener("click", sendManualCommand);
 ui.clearLogBtn.addEventListener("click", () => {
   ui.serialLog.textContent = "";
