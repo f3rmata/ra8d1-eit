@@ -184,9 +184,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--frames-per-rep", type=int, default=10,
                    help="Frames to capture per repetition")
     p.add_argument("--electrodes", type=int, default=8)
-    p.add_argument("--samples", type=int, default=128,
+    p.add_argument("--samples", type=int, default=256,
                    help="ADC samples per route")
-    p.add_argument("--settle-ms", type=int, default=5,
+    p.add_argument("--settle-ms", type=int, default=20,
                    help="Mux settling time (ms) — lower for faster frame rate")
     p.add_argument("--rate", type=int, default=200000,
                    help="ADC sample rate (Hz)")
@@ -200,7 +200,7 @@ def parse_args() -> argparse.Namespace:
                    help="Per-frame timeout (seconds)")
     p.add_argument("--out-dir", type=Path, default=Path("gestures/session"),
                    help="Output directory for collected data")
-    p.add_argument("--min-valid", type=int, default=36,
+    p.add_argument("--min-valid", type=int, default=17,
                    help="Minimum valid_count to keep a frame")
     p.add_argument("--no-extract-features", action="store_true",
                    help="Skip feature extraction, only save raw ds values")

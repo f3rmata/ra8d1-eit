@@ -1,0 +1,22 @@
+{
+  "timestamp": "20260716_214701",
+  "gestures": [
+    "rock",
+    "paper",
+    "scissors"
+  ],
+  "repetitions": 5,
+  "frames_per_repetition": 10,
+  "electrodes": 8,
+  "samples": 128,
+  "settle_ms": 5,
+  "rate_hz": 200000,
+  "pp_limit": 180,
+  "retries": 1,
+  "baseline_frames": 5,
+  "drive_gain": 512,
+  "meas_gain": 6,
+  "total_frames_collected": 150,
+  "kept_frames": 150,
+  "model_version": "jac8-h0.12-kotre-p0.5-lambda0.01-v1"
+}

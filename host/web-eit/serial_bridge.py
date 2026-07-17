@@ -75,24 +75,40 @@ class SerialBridge:
         self._gesture_regions: Any = None
         self._gesture_node_xy: Any = None
         self._gesture_prev_ds: Any = None
+        self._text_recon_summary: dict[str, float] | None = None
+        self._text_recon_ds: list[float] | None = None
         if gesture_model:
             self._init_gesture(gesture_model)
 
     def _init_gesture(self, model_path: str) -> None:
         """Lazy-load the gesture classifier and feature extraction dependencies."""
         try:
-            from gesture.model import GestureClassifier  # pyright: ignore[reportMissingImports]
             from gesture.features import (  # pyright: ignore[reportMissingImports]
                 extract_features,
                 get_node_xy,
                 get_region_masks,
             )
-            self._gesture_clf = GestureClassifier.load(model_path)
+            path = Path(model_path).expanduser()
+            if path.is_dir() or path.suffix.lower() in {".ts", ".pt", ".onnx"}:
+                from gesture.torch_model import TorchGestureClassifier  # pyright: ignore[reportMissingImports]
+
+                self._gesture_clf = TorchGestureClassifier(path)
+            else:
+                from gesture.model import GestureClassifier  # pyright: ignore[reportMissingImports]
+
+                self._gesture_clf = GestureClassifier.load(path)
             self._gesture_node_xy = get_node_xy()
             self._gesture_regions = get_region_masks()
             self._extract_features = extract_features
             print(f"Gesture model loaded: {model_path}")
             print(f"  Gestures: {list(self._gesture_clf.label_encoder.classes_)}")
+            if hasattr(self._gesture_clf, "calibrated_temperature"):
+                print(
+                    "  Runtime confidence: "
+                    f"temperature={self._gesture_clf.temperature:.3f}, "
+                    f"threshold={self._gesture_clf.confidence_threshold:.3f}, "
+                    f"calibrated_temperature={self._gesture_clf.calibrated_temperature:.3f}"
+                )
         except Exception as exc:
             print(f"Warning: gesture model not loaded: {exc}", file=sys.stderr)
             self._gesture_clf = None
@@ -126,6 +142,10 @@ class SerialBridge:
             data = command.strip()
             if not data:
                 return
+            if data.startswith("reconstream start") or data == "reconstream stop":
+                self._gesture_prev_ds = None
+                if self._gesture_clf is not None and hasattr(self._gesture_clf, "reset"):
+                    self._gesture_clf.reset()
             if self.host_solver is not None and self.host_solver.can_handle(data):
                 self._broadcast({"type": "tx", "line": data})
                 self.host_solver.handle_command(data)
@@ -302,6 +322,7 @@ class SerialBridge:
 
     def emit_protocol_line(self, line: str) -> None:
         self._broadcast({"type": "rx", "line": line})
+        self._handle_text_gesture_line(line)
 
     def begin_internal_capture(self) -> None:
         self._suppress_rx_broadcast = True
@@ -320,6 +341,38 @@ class SerialBridge:
                 pass
         if not self._suppress_rx_broadcast:
             self._broadcast({"type": "rx", "line": line})
+        self._handle_text_gesture_line(line)
+
+    def _handle_text_gesture_line(self, line: str) -> None:
+        if self._gesture_clf is None:
+            return
+        try:
+            if line.startswith("RECONFAST_BEGIN,"):
+                self._text_recon_summary = None
+                self._text_recon_ds = None
+                return
+            if line.startswith("RECON_SUMMARY,"):
+                parts = line.split(",")
+                if len(parts) == 8:
+                    self._text_recon_summary = {
+                        "valid_count": float(parts[1]),
+                        "invalid_count": float(parts[2]),
+                        "retry_count": float(parts[3]),
+                        "ds_min": float(parts[4]),
+                        "ds_max": float(parts[5]),
+                        "ds_abs_p98": float(parts[6]),
+                        "rel_l2": float(parts[7]),
+                    }
+                return
+            if line.startswith("RECONFAST_DS,"):
+                self._text_recon_ds = [float(value) for value in line.split(",")[1:]]
+                return
+            if line == "RECONFAST_DONE" and self._text_recon_summary is not None and self._text_recon_ds is not None:
+                self._classify_gesture_frame(self._text_recon_ds, self._text_recon_summary)
+                self._text_recon_summary = None
+                self._text_recon_ds = None
+        except Exception as exc:
+            self._broadcast({"type": "error", "text": f"gesture text frame failed: {exc}"})
 
     def _emit_reconfast_binary(
         self,
@@ -365,37 +418,40 @@ class SerialBridge:
         })
         self._broadcast({"type": "rx", "line": "RECONFAST_DONE"})
 
-        # Gesture classification side-channel
-        if self._gesture_clf is not None:
-            try:
-                import numpy as np  # noqa: F811
-                ds_arr = np.array(list(ds_values), dtype=np.float64)
-                summary = {
-                    "valid_count": valid,
-                    "invalid_count": invalid,
-                    "retry_count": retry,
-                    "ds_min": ds_min,
-                    "ds_max": ds_max,
-                    "ds_abs_p98": ds_abs_p98,
-                    "rel_l2": rel_l2,
-                }
-                feat = self._extract_features(
-                    ds_arr,
-                    summary,
-                    prev_ds_node=self._gesture_prev_ds,
-                    regions=self._gesture_regions,
-                    node_xy=self._gesture_node_xy,
-                )
-                label, confidence, all_probas = self._gesture_clf.predict(feat.values)
-                self._broadcast({
-                    "type": "gesture",
-                    "label": label,
-                    "confidence": round(confidence, 4),
-                    "all_probas": {k: round(v, 4) for k, v in all_probas.items()},
-                })
-                self._gesture_prev_ds = ds_arr
-            except Exception as exc:
-                self._broadcast({"type": "error", "text": f"gesture classification failed: {exc}"})
+        self._classify_gesture_frame(ds_values, {
+            "valid_count": valid,
+            "invalid_count": invalid,
+            "retry_count": retry,
+            "ds_min": ds_min,
+            "ds_max": ds_max,
+            "ds_abs_p98": ds_abs_p98,
+            "rel_l2": rel_l2,
+        })
+
+    def _classify_gesture_frame(self, ds_values: Any, summary: dict[str, float]) -> None:
+        if self._gesture_clf is None:
+            return
+        try:
+            import numpy as np
+
+            ds_arr = np.asarray(ds_values, dtype=np.float64)
+            feat = self._extract_features(
+                ds_arr,
+                summary,
+                prev_ds_node=self._gesture_prev_ds,
+                regions=self._gesture_regions,
+                node_xy=self._gesture_node_xy,
+            )
+            label, confidence, all_probas = self._gesture_clf.predict(feat.values)
+            self._broadcast({
+                "type": "gesture",
+                "label": label,
+                "confidence": round(confidence, 4),
+                "all_probas": {key: round(value, 4) for key, value in all_probas.items()},
+            })
+            self._gesture_prev_ds = ds_arr
+        except Exception as exc:
+            self._broadcast({"type": "error", "text": f"gesture classification failed: {exc}"})
 
     def _broadcast(self, event: dict[str, Any]) -> None:
         with self._clients_lock:
@@ -830,8 +886,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--route-step-limit", type=float, default=0.08)
     parser.add_argument("--route-guard-history", type=int, default=5)
     parser.add_argument("--route-guard-max-routes", type=int, default=3)
-    parser.add_argument("--gesture-model", default=None,
-                        help="Path to gesture model.joblib for real-time classification")
+    parser.add_argument(
+        "--gesture-model",
+        default=None,
+        help="Path to a PyTorch gesture model directory; .joblib remains supported as a fallback",
+    )
     return parser.parse_args()
 
 

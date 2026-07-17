@@ -8,7 +8,7 @@ probabilities (right).
 
 Usage:
     python -m host.gesture.recognize_live --port /dev/ttyACM0 \
-        --model gestures/model.joblib
+        --model host/gestures/torch_mlp_model
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from gesture.features import (  # noqa: E402  # pyright: ignore[reportMissingImp
     get_node_xy,
     get_region_masks,
 )
-from gesture.model import GestureClassifier  # pyright: ignore[reportMissingImports]
+from gesture.torch_model import TorchGestureClassifier  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 # Matplotlib setup
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
@@ -295,10 +295,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--port", required=True, help="Serial port, e.g. /dev/ttyACM0")
     p.add_argument("--baud", type=int, default=460800)
-    p.add_argument("--model", required=True, help="Path to model.joblib")
+    default_model = str(Path(__file__).resolve().parents[1] / "gestures" / "torch_mlp_model")
+    p.add_argument("--model", default=default_model, help="Path to a PyTorch model directory; .joblib remains supported")
     p.add_argument("--electrodes", type=int, default=8)
-    p.add_argument("--samples", type=int, default=128)
-    p.add_argument("--settle-ms", type=int, default=5)
+    p.add_argument("--samples", type=int, default=256)
+    p.add_argument("--settle-ms", type=int, default=20)
     p.add_argument("--rate", type=int, default=200000)
     p.add_argument("--pp-limit", type=int, default=180)
     p.add_argument("--retries", type=int, default=1)
@@ -313,7 +314,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log", type=Path, default=None,
                    help="CSV path to log predictions")
     p.add_argument("--no-plot", action="store_true")
-    p.add_argument("--threshold", type=float, default=0.6,
+    p.add_argument("--threshold", type=float, default=0.38,
                    help="Confidence threshold for 'unknown'")
     p.add_argument("--lcd", action="store_true",
                    help="Send 'icon r|s|p' to MCU to update LCD on gesture change")
@@ -334,7 +335,13 @@ def recognize_live(args: argparse.Namespace) -> None:
 
     # Load model
     print(f"Loading model: {args.model}")
-    clf = GestureClassifier.load(args.model)
+    model_path = Path(args.model).expanduser()
+    if model_path.is_dir() or model_path.suffix.lower() in {".ts", ".pt", ".onnx"}:
+        clf = TorchGestureClassifier(model_path, confidence_threshold=args.threshold)
+    else:
+        from gesture.model import GestureClassifier  # pyright: ignore[reportMissingImports]
+
+        clf = GestureClassifier.load(model_path)
     clf.confidence_threshold = args.threshold
     gesture_labels = [str(l) for l in clf.label_encoder.classes_]
     if "unknown" not in gesture_labels:

@@ -22,10 +22,11 @@ bsp_ipc_semaphore_handle_t g_core_start_semaphore =
 
 #define FW_VERSION              "ra8d1-eit-p0-dma-ac10k-picostat-cpha-even-v1"
 #define LED1_PIN                BSP_IO_PORT_01_PIN_06
-#define USER_BUTTON_PIN         BSP_IO_PORT_09_PIN_07
+#define USER_BUTTON_PIN         BSP_IO_PORT_09_PIN_07  /* KEY0/K1: pull-up, pressed low */
 #define LED_BLINK_DELAY_MS      (500U)
 #define USER_BUTTON_DEBOUNCE_MS (40U)
 #define LCD_GESTURE_STEP_MS     (6000U)
+#define RECON_STREAM_COMMAND_GAP_MS (250U)
 #define UART9_TX_TIMEOUT_MS     (100U)
 #define UART9_BAUD              (460800U)
 #define UART9_BAUD_MAX_ERROR_X1000 (5000U)
@@ -86,6 +87,23 @@ typedef struct st_scan_stat
     uint32_t retry_count;
 } scan_stat_t;
 
+typedef struct st_recon_workspace
+{
+    scan_stat_t stats[EIT_RECON_ROUTES];
+    float amp_v[EIT_RECON_ROUTES];
+    bool valid[EIT_RECON_ROUTES];
+    float ds_node[EIT_RECON_NODES];
+} recon_workspace_t;
+
+typedef struct st_recon_stream_cfg
+{
+    uint32_t samples;
+    uint32_t settle_ms;
+    uint32_t rate;
+    uint32_t pp_limit;
+    uint32_t retries;
+} recon_stream_cfg_t;
+
 typedef enum e_lcd_mode
 {
     LCD_MODE_RECON = 0,
@@ -122,6 +140,7 @@ static void command_scanstatbin(char * p);
 static void command_recon(char * p);
 static void command_reconfast(char * p);
 static void command_reconfastbin(char * p);
+static void command_reconstream(char * p);
 static void command_recon_common(char * p, bool fast);
 static void command_reconbase(char * p);
 static void command_recondump(void);
@@ -168,6 +187,13 @@ static void write_reconfast_binary_frame(uint32_t frame_id,
 static void pack_scanstat_binary_row(scan_stat_t const * p_stat, uint8_t row[EIT_BIN_SCANSTAT_ROW_SIZE]);
 static void pack_reconfast_summary(eit_recon_summary_t const * p_summary,
                                    uint8_t summary[EIT_BIN_RECONFAST_SUMMARY_SIZE]);
+static bool capture_and_solve_recon(recon_stream_cfg_t const * p_cfg,
+                                    eit_recon_summary_t * p_summary);
+static void write_recon_text_frame(bool fast,
+                                   uint32_t frame_id,
+                                   eit_recon_summary_t const * p_summary,
+                                   float const ds_node[EIT_RECON_NODES]);
+static void recon_stream_service(void);
 static void put_le16(uint8_t * p_dst, uint16_t value);
 static void put_le32(uint8_t * p_dst, uint32_t value);
 static void put_le_float32(uint8_t * p_dst, float value);
@@ -195,6 +221,18 @@ static uint32_t g_frame_id = 0U;
 static uint16_t g_last_drive_gain = 512U;
 static uint16_t g_last_meas_gain = 512U;
 static uint16_t g_scan_hist[1024];
+static recon_workspace_t g_recon_workspace;
+static recon_stream_cfg_t g_recon_stream_cfg =
+{
+    .samples = 256U,
+    .settle_ms = 20U,
+    .rate = 200000U,
+    .pp_limit = SCAN_DEFAULT_PP_LIMIT,
+    .retries = SCAN_DEFAULT_RETRIES,
+};
+static bool g_recon_stream_enabled = false;
+static bool g_recon_stream_first_frame = true;
+static uint32_t g_recon_stream_next_frame_ms = 0U;
 static bool g_app_time_ready = false;
 static uint32_t g_time_last_cycles = 0U;
 static uint32_t g_time_cycle_remainder = 0U;
@@ -303,6 +341,7 @@ void hal_entry(void)
             }
         }
 
+        recon_stream_service();
         R_BSP_SoftwareDelay(1U, BSP_DELAY_UNITS_MILLISECONDS);
     }
 }
@@ -419,6 +458,10 @@ static void process_line(char * p_line)
     {
         command_reconfastbin(p);
     }
+    else if (0 == strcmp(command, "reconstream"))
+    {
+        command_reconstream(p);
+    }
     else if (0 == strcmp(command, "reconbase"))
     {
         command_reconbase(p);
@@ -467,6 +510,8 @@ static void print_help(void)
     uart9_write_string("  recon 8 256 20 200000 180 1          one MCU-side JAC frame\r\n");
     uart9_write_string("  reconfast 8 256 20 200000 180 1      compact ds-only MCU-side JAC frame\r\n");
     uart9_write_string("  reconfastbin 8 256 20 200000 180 1   binary ds-only MCU-side JAC frame\r\n");
+    uart9_write_string("  reconstream start 8 256 20 200000 180 1  MCU autonomous recon/LCD stream\r\n");
+    uart9_write_string("  reconstream stop|status               control autonomous recon stream\r\n");
     uart9_write_string("  reconbase 8 N 256 20 200000 180 1    average N valid frames into RAM baseline\r\n");
     uart9_write_string("  recondump                             print reconstruction model metadata\r\n");
     uart9_write_string("  lcd [color]                           LCD test: no arg=RGB cycle, arg=0xRRGGBB fill\r\n");
@@ -947,27 +992,102 @@ static void command_reconfastbin(char * p)
         retries = 3U;
     }
 
-    static scan_stat_t stats[EIT_RECON_ROUTES];
-    static float amp_v[EIT_RECON_ROUTES];
-    static bool valid[EIT_RECON_ROUTES];
-    static float ds_node[EIT_RECON_NODES];
-    uint32_t retry_count = 0U;
+    recon_stream_cfg_t cfg =
+    {
+        .samples = samples,
+        .settle_ms = settle_ms,
+        .rate = rate,
+        .pp_limit = pp_limit,
+        .retries = retries,
+    };
     eit_recon_summary_t summary;
 
-    g_frame_id++;
-    if (!capture_recon_stats(samples, rate, settle_ms, pp_limit, retries, stats))
+    if (!capture_and_solve_recon(&cfg, &summary))
     {
         eit_mux_all_off();
         uart9_write_string("ERR: recon capture failed\r\n");
         return;
     }
 
-    recon_stats_to_vectors(stats, amp_v, valid, &retry_count);
-    eit_recon_solve(amp_v, valid, retry_count, ds_node, &summary);
+    write_reconfast_binary_frame(g_frame_id, &summary, g_recon_workspace.ds_node);
+}
 
-    lcd_show_recon_or_gesture(ds_node, &summary, g_frame_id);
+static void command_reconstream(char * p)
+{
+    skip_spaces(&p);
 
-    write_reconfast_binary_frame(g_frame_id, &summary, ds_node);
+    char action[12] = {0};
+    uint32_t action_len = 0U;
+    while ((isalnum((unsigned char) *p) || ('_' == *p)) && (action_len < (sizeof(action) - 1U)))
+    {
+        action[action_len++] = (char) tolower((unsigned char) *p);
+        p++;
+    }
+
+    if (('\0' == action[0]) || (0 == strcmp(action, "status")))
+    {
+        uart9_write_string("reconstream: ");
+        uart9_write_string(g_recon_stream_enabled ? "running" : "stopped");
+        uart9_write_string("\r\n");
+        return;
+    }
+
+    if (0 == strcmp(action, "stop"))
+    {
+        g_recon_stream_enabled = false;
+        (void) eit_mux_all_off();
+        uart9_write_string("reconstream: stopped\r\n");
+        return;
+    }
+
+    if (0 != strcmp(action, "start"))
+    {
+        uart9_write_string("usage: reconstream start 8 256 20 200000 180 1 | stop | status\r\n");
+        return;
+    }
+
+    uint32_t electrodes = EIT_RECON_ELECTRODES;
+    uint32_t samples = 256U;
+    uint32_t settle_ms = 20U;
+    uint32_t rate = 200000U;
+    uint32_t pp_limit = SCAN_DEFAULT_PP_LIMIT;
+    uint32_t retries = SCAN_DEFAULT_RETRIES;
+    (void) parse_u32(&p, &electrodes);
+    (void) parse_u32(&p, &samples);
+    (void) parse_u32(&p, &settle_ms);
+    (void) parse_u32(&p, &rate);
+    (void) parse_u32(&p, &pp_limit);
+    (void) parse_u32(&p, &retries);
+
+    if (EIT_RECON_ELECTRODES != electrodes)
+    {
+        uart9_write_string("ERR: recon model supports exactly 8 electrodes\r\n");
+        return;
+    }
+    if (samples < 1U)
+    {
+        samples = 1U;
+    }
+    if (samples > ADC_MAX_SAMPLES)
+    {
+        samples = ADC_MAX_SAMPLES;
+    }
+    if (retries > 3U)
+    {
+        retries = 3U;
+    }
+
+    g_recon_stream_cfg.samples = samples;
+    g_recon_stream_cfg.settle_ms = settle_ms;
+    g_recon_stream_cfg.rate = rate;
+    g_recon_stream_cfg.pp_limit = pp_limit;
+    g_recon_stream_cfg.retries = retries;
+    g_recon_stream_first_frame = true;
+    g_recon_stream_next_frame_ms = app_millis();
+    g_recon_stream_enabled = true;
+    lcd_mode_enter_recon();
+
+    uart9_write_string("reconstream: running\r\n");
 }
 
 static void command_recon_common(char * p, bool fast)
@@ -1003,28 +1123,63 @@ static void command_recon_common(char * p, bool fast)
         retries = 3U;
     }
 
-    static scan_stat_t stats[EIT_RECON_ROUTES];
-    static float amp_v[EIT_RECON_ROUTES];
-    static bool valid[EIT_RECON_ROUTES];
-    static float ds_node[EIT_RECON_NODES];
-    uint32_t retry_count = 0U;
+    recon_stream_cfg_t cfg =
+    {
+        .samples = samples,
+        .settle_ms = settle_ms,
+        .rate = rate,
+        .pp_limit = pp_limit,
+        .retries = retries,
+    };
     eit_recon_summary_t summary;
 
-    g_frame_id++;
-    if (!capture_recon_stats(samples, rate, settle_ms, pp_limit, retries, stats))
+    if (!capture_and_solve_recon(&cfg, &summary))
     {
         eit_mux_all_off();
         uart9_write_string("ERR: recon capture failed\r\n");
         return;
     }
 
-    recon_stats_to_vectors(stats, amp_v, valid, &retry_count);
-    eit_recon_solve(amp_v, valid, retry_count, ds_node, &summary);
+    write_recon_text_frame(fast, g_frame_id, &summary, g_recon_workspace.ds_node);
+}
 
-    lcd_show_recon_or_gesture(ds_node, &summary, g_frame_id);
+static bool capture_and_solve_recon(recon_stream_cfg_t const * p_cfg,
+                                    eit_recon_summary_t * p_summary)
+{
+    uint32_t retry_count = 0U;
 
+    g_frame_id++;
+    if (!capture_recon_stats(p_cfg->samples,
+                             p_cfg->rate,
+                             p_cfg->settle_ms,
+                             p_cfg->pp_limit,
+                             p_cfg->retries,
+                             g_recon_workspace.stats))
+    {
+        return false;
+    }
+
+    recon_stats_to_vectors(g_recon_workspace.stats,
+                           g_recon_workspace.amp_v,
+                           g_recon_workspace.valid,
+                           &retry_count);
+    eit_recon_solve(g_recon_workspace.amp_v,
+                    g_recon_workspace.valid,
+                    retry_count,
+                    g_recon_workspace.ds_node,
+                    p_summary);
+
+    lcd_show_recon_or_gesture(g_recon_workspace.ds_node, p_summary, g_frame_id);
+    return true;
+}
+
+static void write_recon_text_frame(bool fast,
+                                   uint32_t frame_id,
+                                   eit_recon_summary_t const * p_summary,
+                                   float const ds_node[EIT_RECON_NODES])
+{
     uart9_write_string(fast ? "RECONFAST_BEGIN," : "RECON_BEGIN,");
-    uart9_write_u32(g_frame_id);
+    uart9_write_u32(frame_id);
     uart9_write_string(",");
     uart9_write_u32(EIT_RECON_ELECTRODES);
     uart9_write_string(",");
@@ -1034,19 +1189,19 @@ static void command_recon_common(char * p, bool fast)
     uart9_write_string("\r\n");
 
     uart9_write_string("RECON_SUMMARY,");
-    uart9_write_u32(summary.valid_count);
+    uart9_write_u32(p_summary->valid_count);
     uart9_write_string(",");
-    uart9_write_u32(summary.invalid_count);
+    uart9_write_u32(p_summary->invalid_count);
     uart9_write_string(",");
-    uart9_write_u32(summary.retry_count);
+    uart9_write_u32(p_summary->retry_count);
     uart9_write_string(",");
-    uart9_write_float(summary.ds_min);
+    uart9_write_float(p_summary->ds_min);
     uart9_write_string(",");
-    uart9_write_float(summary.ds_max);
+    uart9_write_float(p_summary->ds_max);
     uart9_write_string(",");
-    uart9_write_float(summary.ds_abs_p98);
+    uart9_write_float(p_summary->ds_abs_p98);
     uart9_write_string(",");
-    uart9_write_float(summary.rel_l2);
+    uart9_write_float(p_summary->rel_l2);
     uart9_write_string("\r\n");
 
     if (fast)
@@ -1059,24 +1214,53 @@ static void command_recon_common(char * p, bool fast)
         }
         uart9_write_string("\r\n");
         uart9_write_string("RECONFAST_DONE\r\n");
+        return;
     }
-    else
+
+    uart9_write_string("node,x,y,ds\r\n");
+    for (uint32_t node = 0U; node < EIT_RECON_NODES; node++)
     {
-        uart9_write_string("node,x,y,ds\r\n");
-        for (uint32_t node = 0U; node < EIT_RECON_NODES; node++)
-        {
-            uart9_write_u32(node);
-            uart9_write_string(",");
-            uart9_write_float(g_eit_recon_node_xy[node][0]);
-            uart9_write_string(",");
-            uart9_write_float(g_eit_recon_node_xy[node][1]);
-            uart9_write_string(",");
-            uart9_write_float(ds_node[node]);
-            uart9_write_string("\r\n");
-            led_heartbeat();
-        }
-        uart9_write_string("RECON_DONE\r\n");
+        uart9_write_u32(node);
+        uart9_write_string(",");
+        uart9_write_float(g_eit_recon_node_xy[node][0]);
+        uart9_write_string(",");
+        uart9_write_float(g_eit_recon_node_xy[node][1]);
+        uart9_write_string(",");
+        uart9_write_float(ds_node[node]);
+        uart9_write_string("\r\n");
+        led_heartbeat();
     }
+    uart9_write_string("RECON_DONE\r\n");
+}
+
+static void recon_stream_service(void)
+{
+    if (!g_recon_stream_enabled)
+    {
+        return;
+    }
+
+    uint32_t now = app_millis();
+    if ((int32_t) (now - g_recon_stream_next_frame_ms) < 0)
+    {
+        return;
+    }
+
+    eit_recon_summary_t summary;
+    if (!capture_and_solve_recon(&g_recon_stream_cfg, &summary))
+    {
+        g_recon_stream_enabled = false;
+        (void) eit_mux_all_off();
+        uart9_write_string("ERR: reconstream capture failed\r\n");
+        return;
+    }
+
+    write_recon_text_frame(!g_recon_stream_first_frame,
+                           g_frame_id,
+                           &summary,
+                           g_recon_workspace.ds_node);
+    g_recon_stream_first_frame = false;
+    g_recon_stream_next_frame_ms = app_millis() + RECON_STREAM_COMMAND_GAP_MS;
 }
 
 static void command_reconbase(char * p)
@@ -1118,9 +1302,6 @@ static void command_reconbase(char * p)
         retries = 3U;
     }
 
-    static scan_stat_t stats[EIT_RECON_ROUTES];
-    static float amp_v[EIT_RECON_ROUTES];
-    static bool valid[EIT_RECON_ROUTES];
     eit_recon_baseline_accum_clear();
 
     uart9_write_string("RECONBASE_BEGIN,");
@@ -1135,18 +1316,26 @@ static void command_reconbase(char * p)
         uint32_t valid_count = 0U;
         uint32_t invalid_count = 0U;
         g_frame_id++;
-        if (!capture_recon_stats(samples, rate, settle_ms, pp_limit, retries, stats))
+        if (!capture_recon_stats(samples,
+                                 rate,
+                                 settle_ms,
+                                 pp_limit,
+                                 retries,
+                                 g_recon_workspace.stats))
         {
             eit_mux_all_off();
             uart9_write_string("ERR: reconbase capture failed\r\n");
             return;
         }
 
-        recon_stats_to_vectors(stats, amp_v, valid, &retry_count);
-        eit_recon_baseline_accum_add(amp_v, valid);
+        recon_stats_to_vectors(g_recon_workspace.stats,
+                               g_recon_workspace.amp_v,
+                               g_recon_workspace.valid,
+                               &retry_count);
+        eit_recon_baseline_accum_add(g_recon_workspace.amp_v, g_recon_workspace.valid);
         for (uint32_t route = 0U; route < EIT_RECON_ROUTES; route++)
         {
-            if (valid[route])
+            if (g_recon_workspace.valid[route])
             {
                 valid_count++;
             }

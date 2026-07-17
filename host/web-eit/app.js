@@ -34,6 +34,7 @@ const ui = {
   baselineFramesInput: $("baselineFramesInput"),
   intervalInput: $("intervalInput"),
   fastModeInput: $("fastModeInput"),
+  mcuContinuousInput: $("mcuContinuousInput"),
   vmaxInput: $("vmaxInput"),
   minVmaxInput: $("minVmaxInput"),
   deadbandInput: $("deadbandInput"),
@@ -59,6 +60,7 @@ const state = {
   busy: false,
   operationInFlight: false,
   pendingLcdToggle: false,
+  mcuStreaming: false,
   templateNodes: null,
   lastFrame: null,
 };
@@ -86,6 +88,7 @@ function settings() {
     baselineFrames: intValue(ui.baselineFramesInput, 5, 1, 50),
     intervalMs: intValue(ui.intervalInput, 0, 0, 10000),
     fastMode: ui.fastModeInput.checked,
+    mcuContinuous: ui.mcuContinuousInput.checked,
     vmax: Math.max(0, numberValue(ui.vmaxInput, 0)),
     minVmax: Math.max(1.0e-9, numberValue(ui.minVmaxInput, 1.0e-4)),
     deadband: Math.max(0, numberValue(ui.deadbandInput, 0)),
@@ -121,6 +124,20 @@ function baselineCommand() {
   ].join(" ");
 }
 
+function streamCommand() {
+  const s = settings();
+  return [
+    "reconstream",
+    "start",
+    s.electrodes,
+    s.samples,
+    s.settleMs,
+    s.rate,
+    s.ppLimit,
+    s.retries,
+  ].join(" ");
+}
+
 function setStatus(text, kind = "") {
   ui.statusText.textContent = text;
   ui.statusText.classList.toggle("is-ok", kind === "ok");
@@ -143,6 +160,7 @@ function updateButtons() {
   ui.stopBtn.disabled = !state.running;
   ui.lcdToggleBtn.disabled = !c || state.busy || (state.operationInFlight && !state.running);
   ui.sendBtn.disabled = !idle;
+  ui.mcuContinuousInput.disabled = state.running || state.busy;
 }
 
 function logLine(text, direction = "rx") {
@@ -629,24 +647,43 @@ async function startLoop() {
   }
   state.operationInFlight = true;
   state.running = true;
+  state.mcuStreaming = false;
   state.templateNodes = null;
   updateButtons();
   try {
+    const continuous = settings().mcuContinuous;
+    if (continuous) {
+      await drainIdle();
+      await writeCommand(streamCommand());
+      state.mcuStreaming = true;
+      setStatus("MCU 持续采集中", "ok");
+    }
+
     while (state.running) {
       const s = settings();
       let frame;
-      if (s.fastMode && state.templateNodes) {
-        frame = await captureReconFastFrame(state.templateNodes);
+      if (continuous) {
+        if (state.templateNodes) {
+          frame = await captureReconFastFrame(state.templateNodes, false);
+        } else {
+          frame = await captureReconFrame(false);
+          state.templateNodes = frame.nodes.map((node) => ({ ...node }));
+        }
+      } else if (s.fastMode && state.templateNodes) {
+        frame = await captureReconFastFrame(state.templateNodes, true);
       } else {
-        frame = await captureReconFrame();
+        frame = await captureReconFrame(true);
         state.templateNodes = frame.nodes.map((node) => ({ ...node }));
+      }
+      if (!state.running) {
+        break;
       }
       state.lastFrame = frame;
       drawFrame(frame);
       setFrameStats(frame);
-      setStatus(`运行中 frame ${frame.frameId}`, "ok");
+      setStatus(`${continuous ? "MCU 持续" : "运行中"} frame ${frame.frameId}`, "ok");
       await flushPendingLcdToggle();
-      if (s.intervalMs > 0) {
+      if (!continuous && s.intervalMs > 0) {
         await sleep(s.intervalMs);
       }
     }
@@ -655,6 +692,14 @@ async function startLoop() {
       setStatus(`采集失败: ${error.message}`, "error");
     }
   } finally {
+    if (state.mcuStreaming) {
+      state.mcuStreaming = false;
+      try {
+        await writeCommand("reconstream stop");
+      } catch (_) {
+        /* Preserve the original capture error/status. */
+      }
+    }
     state.running = false;
     state.operationInFlight = false;
     updateButtons();
@@ -662,15 +707,25 @@ async function startLoop() {
 }
 
 function stopLoop() {
+  const stopMcuStream = state.mcuStreaming;
   state.running = false;
-  setStatus("已停止");
+  state.mcuStreaming = false;
+  resolveAllWaiters(null);
+  if (stopMcuStream) {
+    writeCommand("reconstream stop").catch((error) => {
+      setStatus(`停止 MCU 持续模式失败: ${error.message}`, "error");
+    });
+  }
+  setStatus(stopMcuStream ? "正在停止 MCU 持续模式" : "已停止");
   updateButtons();
 }
 
-async function captureReconFrame() {
-  const command = reconCommand(false);
-  await drainIdle();
-  await writeCommand(command);
+async function captureReconFrame(requestFrame = true) {
+  if (requestFrame) {
+    const command = reconCommand(false);
+    await drainIdle();
+    await writeCommand(command);
+  }
 
   const s = settings();
   const deadlineBase = Math.max(45000, s.samples * 200);
@@ -753,10 +808,12 @@ async function captureReconFrame() {
   throw new Error("等待 RECON_DONE 超时");
 }
 
-async function captureReconFastFrame(templateNodes) {
-  const command = reconCommand(true);
-  await drainIdle();
-  await writeCommand(command);
+async function captureReconFastFrame(templateNodes, requestFrame = true) {
+  if (requestFrame) {
+    const command = reconCommand(true);
+    await drainIdle();
+    await writeCommand(command);
+  }
 
   const s = settings();
   const deadlineBase = Math.max(45000, s.samples * 200);
@@ -1076,8 +1133,10 @@ async function sendManualCommand() {
   }
 }
 
-async function sendLcdToggleCommand() {
-  await drainIdle();
+async function sendLcdToggleCommand(skipDrain = false) {
+  if (!skipDrain) {
+    await drainIdle();
+  }
   await writeCommand("lcdmode toggle");
 }
 
@@ -1087,7 +1146,7 @@ async function flushPendingLcdToggle() {
   }
 
   state.pendingLcdToggle = false;
-  await sendLcdToggleCommand();
+  await sendLcdToggleCommand(state.mcuStreaming);
   setStatus("LCD 显示已切换", "ok");
 }
 

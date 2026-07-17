@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EIT Gesture Recognition - Model Performance</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  background: #f4f5f5;
+  color: #111111;
+}
+.page {
+  width: min(100%, 1180px);
+}
+.performance-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #f4f5f5;
+}
+@media print {
+  @page { size: A4 landscape; margin: 10mm; }
+  body { padding: 0; }
+  .page { width: 100%; }
+}
+</style>
+</head>
+<body>
+<main class="page">
+  <img class="performance-chart" src="model_performance.png" alt="EIT gesture recognition performance metrics chart">
+</main>
+</body>
+</html>
